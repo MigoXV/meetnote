@@ -208,3 +208,17 @@ async def test_planning_fallback_is_visible_and_keeps_summary():
     assert "周四验收" in draft.markdown
     assert len(draft.delivery_warnings) == 2
     assert len([1 for kind, _ in events if kind == "node.degraded"]) == 2
+
+
+async def test_composer_normalizes_html_breaks_to_markdown():
+    class HtmlBreaks(MockClient):
+        async def generate(self, task, instructions, context, schema):
+            result = await super().generate(task, instructions, context, schema)
+            if task == "compose":
+                return result.model_copy(update={"markdown": "# 纪要<br>## 行动<BR />周四验收"})
+            return result
+
+    runtime, _ = engine(HtmlBreaks())
+    await runtime.append(chunk("周四由陈宁完成验收。"))
+    await runtime.finalize()
+    assert runtime.state["knowledge"].draft.markdown == "# 纪要\n\n## 行动\n\n周四验收"

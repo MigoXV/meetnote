@@ -124,7 +124,7 @@ data: {"id":42,"type":"summary.committed","data":{"id":"summary_0001","summary":
 | `main_minutes_planner` | 结合当前证据与上一轮计划更新纪要规划 |
 | `minutes_composer` | 收尾时根据完整已提交证据生成纪要 |
 
-所有入口都调用同一 `MeetingEngine` 和 LangGraph，不另写一份节点循环。会话消费者是图状态的唯一写入者；图按节点更新状态，输入接收队列与模型调用分离。Stream、Cycle、Schedule、Knowledge 是四组职责明确的状态，事件日志位于图状态之外。
+所有入口都调用同一 `MeetingEngine`，通过原生 `async/await` 顺序执行上述 13 个节点。统一执行器负责状态合并、事件和计时；每步成功立即保存，后续失败或取消时保留已完成的更新。会话消费者是引擎状态的唯一写入者，输入接收队列与模型调用分离。Stream、Cycle、Schedule、Knowledge 是四组职责明确的状态，节点返回类型明确的 `StatePatch`：省略字段表示保留，显式 `None` 表示清空，空更新表示跳过。事件日志位于引擎状态之外。
 
 `domain` 定义契约；`engine` 承载业务节点及纯规则；`llm` 只处理 Responses 传输与结构校验；`sessions` 管理内存生命周期；`web` 适配 HTTP/SSE；`commands`、`corpus` 负责命令和只读语料。各模型任务的指令放在独立 Prompt 资源中，Schema 由 Pydantic 字段定义生成。
 
