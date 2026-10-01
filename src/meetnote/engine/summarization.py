@@ -1,7 +1,7 @@
 from dataclasses import replace
 
 from meetnote.domain.results import BoundaryDecision, CommittedSummary
-from meetnote.domain.state import GraphState
+from meetnote.domain.state import EngineState, StatePatch
 from meetnote.engine.boundaries import consumed_prefix
 from meetnote.engine.context import Context
 from meetnote.engine.quality import (
@@ -12,7 +12,7 @@ from meetnote.engine.quality import (
 )
 
 
-async def summary_worker(state: GraphState, ctx: Context) -> dict:
+async def summary_worker(state: EngineState, ctx: Context) -> StatePatch:
     cycle, knowledge = state["cycle"], state["knowledge"]
     if "summary" not in cycle.jobs:
         return {}
@@ -46,7 +46,7 @@ async def summary_worker(state: GraphState, ctx: Context) -> dict:
     return {"cycle": replace(cycle, decision=decision)}
 
 
-async def bucket_enricher(state: GraphState, ctx: Context) -> dict:
+async def bucket_enricher(state: EngineState, ctx: Context) -> StatePatch:
     cycle, stream, knowledge, schedule = (
         state["cycle"],
         state["stream"],

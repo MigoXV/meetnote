@@ -1,4 +1,4 @@
-"""图内部按职责分组的状态；每个节点用 replace 返回更新。"""
+"""引擎内部按职责分组的状态；每个节点用 replace 返回更新。"""
 
 from dataclasses import dataclass
 from typing import Literal, TypedDict
@@ -67,18 +67,33 @@ class KnowledgeState:
     warnings: tuple[str, ...] = ()
 
 
-class GraphState(TypedDict):
+CycleMode = Literal["normal", "flush", "compose"]
+
+
+class EngineState(TypedDict):
     stream: StreamState
     cycle: CycleState
     schedule: ScheduleState
     knowledge: KnowledgeState
     input: TranscriptChunk | None
-    mode: Literal["normal", "flush", "compose"]
+    mode: CycleMode
     title: str
 
 
-def initial_state(title: str = "") -> GraphState:
-    return GraphState(
+class StatePatch(TypedDict, total=False):
+    """省略字段表示保留原值；显式 None 表示清空。"""
+
+    stream: StreamState
+    cycle: CycleState
+    schedule: ScheduleState
+    knowledge: KnowledgeState
+    input: TranscriptChunk | None
+    mode: CycleMode
+    title: str
+
+
+def initial_state(title: str = "") -> EngineState:
+    return EngineState(
         stream=StreamState(),
         cycle=CycleState(),
         schedule=ScheduleState(),

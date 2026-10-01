@@ -1,12 +1,12 @@
 from dataclasses import replace
 
 from meetnote.domain.results import Signal
-from meetnote.domain.state import GraphState
+from meetnote.domain.state import EngineState, StatePatch
 from meetnote.engine.context import Context
 from meetnote.llm.client import ModelFailure
 
 
-async def llm_signal_marker(state: GraphState, ctx: Context) -> dict:
+async def llm_signal_marker(state: EngineState, ctx: Context) -> StatePatch:
     cycle = state["cycle"]
     if not cycle.text:
         return {}
@@ -29,7 +29,7 @@ async def llm_signal_marker(state: GraphState, ctx: Context) -> dict:
     return {"cycle": replace(cycle, signal=signal)}
 
 
-async def commit_debt_meter(state: GraphState, ctx: Context) -> dict:
+async def commit_debt_meter(state: EngineState, ctx: Context) -> StatePatch:
     signal = state["cycle"].signal
     debt = state["schedule"]
     if signal is None:
@@ -47,7 +47,7 @@ async def commit_debt_meter(state: GraphState, ctx: Context) -> dict:
     }
 
 
-async def work_candidate_builder(state: GraphState, ctx: Context) -> dict:
+async def work_candidate_builder(state: EngineState, ctx: Context) -> StatePatch:
     cycle, debt, knowledge = state["cycle"], state["schedule"], state["knowledge"]
     candidates: tuple[str, ...] = ()
     count = len(knowledge.summaries)
@@ -69,7 +69,7 @@ async def work_candidate_builder(state: GraphState, ctx: Context) -> dict:
     return {"cycle": replace(cycle, candidates=candidates)}
 
 
-async def model_work_scheduler(state: GraphState, ctx: Context) -> dict:
+async def model_work_scheduler(state: EngineState, ctx: Context) -> StatePatch:
     cycle = state["cycle"]
     jobs = ("summary",) if "summary" in cycle.candidates else cycle.candidates
     deferred = tuple(item for item in cycle.candidates if item not in jobs)

@@ -1,7 +1,8 @@
+import re
 from dataclasses import replace
 
 from meetnote.domain.results import MeetingLens, MinuteDraft, MinutesPlan, Section, StructureHint
-from meetnote.domain.state import GraphState, KnowledgeState
+from meetnote.domain.state import EngineState, KnowledgeState, StatePatch
 from meetnote.engine.context import Context
 from meetnote.engine.quality import keyword_candidates, merge_unique
 from meetnote.llm.client import ModelFailure
@@ -28,7 +29,7 @@ def degraded(ctx: Context, node: str, exc: Exception, knowledge: KnowledgeState)
     )
 
 
-async def meeting_lens_builder(state: GraphState, ctx: Context) -> dict:
+async def meeting_lens_builder(state: EngineState, ctx: Context) -> StatePatch:
     if "lens" not in state["cycle"].jobs:
         return {}
     knowledge = state["knowledge"]
@@ -59,7 +60,7 @@ def fallback_hint(knowledge: KnowledgeState) -> StructureHint:
     )
 
 
-async def template_planner(state: GraphState, ctx: Context) -> dict:
+async def template_planner(state: EngineState, ctx: Context) -> StatePatch:
     if "hint" not in state["cycle"].jobs:
         return {}
     knowledge = state["knowledge"]
@@ -74,7 +75,7 @@ async def template_planner(state: GraphState, ctx: Context) -> dict:
     }
 
 
-async def main_minutes_planner(state: GraphState, ctx: Context) -> dict:
+async def main_minutes_planner(state: EngineState, ctx: Context) -> StatePatch:
     knowledge = state["knowledge"]
     final = state["mode"] == "compose"
     if not knowledge.summaries or (
@@ -119,7 +120,7 @@ async def main_minutes_planner(state: GraphState, ctx: Context) -> dict:
     }
 
 
-async def minutes_composer(state: GraphState, ctx: Context) -> dict:
+async def minutes_composer(state: EngineState, ctx: Context) -> StatePatch:
     knowledge = state["knowledge"]
     if state["mode"] != "compose" or not knowledge.plan:
         return {}
@@ -153,6 +154,8 @@ async def minutes_composer(state: GraphState, ctx: Context) -> dict:
             evidence_trace=evidence_ids,
         )
     warnings = merge_unique(draft.delivery_warnings, list(knowledge.warnings))
-    draft = draft.model_copy(update={"delivery_warnings": warnings})
+    # 部分兼容模型把段落换行输出成 HTML，统一为 Markdown，前端仍禁用原始 HTML。
+    markdown = re.sub(r"<br\s*/?>", "\n\n", draft.markdown, flags=re.IGNORECASE)
+    draft = draft.model_copy(update={"delivery_warnings": warnings, "markdown": markdown})
     ctx.emit("minutes.completed", draft.model_dump(mode="json"))
     return {"knowledge": replace(knowledge, draft=draft)}

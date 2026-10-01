@@ -1,15 +1,16 @@
-"""所有入口共用的图与生命周期；没有旁路节点执行列表。"""
+"""所有入口共用的顺序异步流水线与生命周期。"""
 
+from collections.abc import Awaitable, Callable
 from time import monotonic, perf_counter
 
-from langgraph.graph import END, START, StateGraph
-
-from meetnote.domain.state import GraphState, StreamState, initial_state
+from meetnote.domain.state import CycleMode, EngineState, StatePatch, StreamState, initial_state
 from meetnote.domain.transcripts import TranscriptChunk
 from meetnote.engine import ingestion, planning, scheduling, summarization
 from meetnote.engine.context import Context
 
-NODES = (
+Node = Callable[[EngineState, Context], Awaitable[StatePatch]]
+
+NODES: tuple[Node, ...] = (
     ingestion.bucket_accumulator,
     ingestion.cycle_slice_builder,
     ingestion.fallback_guard,
@@ -35,38 +36,28 @@ class MeetingEngine:
         self.context = context
         self.state = initial_state(title)
         self.state["stream"] = StreamState(last_check=monotonic())
-        builder = StateGraph(GraphState)
-        previous = START
+
+    async def _execute(self, node: Node, state: EngineState) -> EngineState:
+        name = node.__name__
+        started = perf_counter()
+        self.context.emit("node.started", {"node": name})
+        try:
+            patch = await node(state, self.context)
+        except Exception as exc:
+            self.context.emit("node.failed", {"node": name, "error": type(exc).__name__})
+            raise
+        # 每步成功后立即保存；后续失败或取消时仍保留已完成的更新。
+        self.state = {**state, **patch}
+        self.context.emit(
+            "node.completed" if patch else "node.skipped",
+            {"node": name, "elapsed_ms": round((perf_counter() - started) * 1000)},
+        )
+        return self.state
+
+    async def cycle(self, mode: CycleMode = "normal", chunk: TranscriptChunk | None = None) -> None:
+        state: EngineState = {**self.state, "mode": mode, "input": chunk}
         for node in NODES:
-            builder.add_node(node.__name__, self._wrap(node))
-            builder.add_edge(previous, node.__name__)
-            previous = node.__name__
-        builder.add_edge(previous, END)
-        self.graph = builder.compile()
-
-    def _wrap(self, node):
-        async def execute(state: GraphState):
-            name = node.__name__
-            started = perf_counter()
-            self.context.emit("node.started", {"node": name})
-            try:
-                patch = await node(state, self.context)
-            except Exception as exc:
-                self.context.emit("node.failed", {"node": name, "error": type(exc).__name__})
-                raise
-            # 保存已成功执行的节点状态，模型失败时原文仍可查询。
-            self.state = {**state, **patch}
-            self.context.emit(
-                "node.completed" if patch else "node.skipped",
-                {"node": name, "elapsed_ms": round((perf_counter() - started) * 1000)},
-            )
-            return patch
-
-        return execute
-
-    async def cycle(self, mode="normal", chunk: TranscriptChunk | None = None) -> None:
-        invocation = {**self.state, "mode": mode, "input": chunk}
-        self.state = await self.graph.ainvoke(invocation)
+            state = await self._execute(node, state)
 
     async def append(self, chunk: TranscriptChunk) -> None:
         await self.cycle(chunk=chunk)

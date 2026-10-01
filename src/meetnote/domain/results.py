@@ -10,7 +10,9 @@ class Result(BaseModel):
 
 
 class Action(Result):
-    owner: str = Field(description="原文明确的负责人；未知时为空")
+    owner: str = Field(
+        description="仅限原文明示分工或本人承诺的负责人；发言人不自动是负责人，未知时为空"
+    )
     task: str = Field(description="已确认的行动，不把建议当作承诺")
     due_date: str = Field(default="", description="原文给出的期限；未知时为空")
 

@@ -1,11 +1,11 @@
 from dataclasses import replace
 from time import monotonic
 
-from meetnote.domain.state import CycleState, GraphState
+from meetnote.domain.state import CycleState, EngineState, StatePatch
 from meetnote.engine.context import Context
 
 
-async def bucket_accumulator(state: GraphState, ctx: Context) -> dict:
+async def bucket_accumulator(state: EngineState, ctx: Context) -> StatePatch:
     chunk = state["input"]
     if chunk is None:
         return {}
@@ -22,7 +22,7 @@ async def bucket_accumulator(state: GraphState, ctx: Context) -> dict:
     }
 
 
-async def cycle_slice_builder(state: GraphState, ctx: Context) -> dict:
+async def cycle_slice_builder(state: EngineState, ctx: Context) -> StatePatch:
     stream = state["stream"]
     settings = ctx.settings
     ready = len(stream.buffer) >= settings.window_chars or (
@@ -43,6 +43,6 @@ async def cycle_slice_builder(state: GraphState, ctx: Context) -> dict:
     return {"stream": replace(stream, last_check=monotonic()), "cycle": cycle}
 
 
-async def fallback_guard(state: GraphState, ctx: Context) -> dict:
+async def fallback_guard(state: EngineState, ctx: Context) -> StatePatch:
     cycle = state["cycle"]
     return {"cycle": replace(cycle, guard="ready" if cycle.text else "idle")}
