@@ -1,0 +1,43 @@
+[project]
+name = "meetnote"
+version = "0.1.0"
+description = "无持久化的会议摘要 sidecar 与十三节点调试工作台"
+authors = [{name = "migo", email = "1695587905@qq.com"}]
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "typer>=0.15,<1", "fastapi[standard]>=0.138,<1", "pydantic-settings>=2,<3",
+  "langgraph>=1,<2", "openai>=2,<3", "httpx>=0.28,<1",
+]
+
+[tool.poetry]
+packages = [{include = "meetnote", from = "src"}]
+include = ["src/meetnote/prompts/*.txt"]
+
+[tool.poetry.scripts]
+meetnote = "meetnote.commands.app:app"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8,<9"
+pytest-asyncio = ">=0.24,<2"
+ruff = ">=0.11,<1"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[[tool.poetry.source]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+priority = "primary"
+
+[build-system]
+requires = ["poetry-core>=2,<3"]
+build-backend = "poetry.core.masonry.api"
