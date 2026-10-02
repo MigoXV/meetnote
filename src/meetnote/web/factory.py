@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from meetnote.config import Settings
 from meetnote.corpus.reader import read_transcripts
 from meetnote.domain.transcripts import ChunkInput, Transcript
-from meetnote.engine.runtime import NODES
+from meetnote.engine.runtime import STAGES
 from meetnote.llm.client import ModelClient, ResponsesClient
 from meetnote.llm.mock import MockClient
 from meetnote.sessions.events import Event
@@ -64,9 +64,10 @@ def create_app(
     async def info():
         return {
             "name": "MeetNote",
+            "contract_version": 2,
             "provider": settings.provider,
             "model": settings.model,
-            "nodes": [n.__name__ for n in NODES],
+            "nodes": list(STAGES),
             "persistence": False,
             "retention_seconds": settings.retention_seconds,
         }
@@ -80,7 +81,7 @@ def create_app(
 
     @app.post("/api/v1/sessions", status_code=201, response_model=SessionSnapshot)
     async def create_session(body: CreateSession):
-        return manager().create(body.title).snapshot()
+        return manager().create(body.title, body.meeting_date).snapshot()
 
     @app.get("/api/v1/sessions/{session_id}", response_model=SessionSnapshot)
     async def get_session(session_id: str):

@@ -16,7 +16,7 @@ test("回放、收尾、双主题与窄屏", async ({ page }) => {
   });
   await expect(page.locator(".summary")).not.toHaveCount(0);
   await page.getByRole("tab", { name: "最终纪要" }).click();
-  await expect(page.locator(".minutes")).toContainText("模拟会议纪要");
+  await expect(page.locator(".minutes")).toContainText("完整事项清单");
   await page.screenshot({
     path: "/tmp/meetnote-result-abyssus.png",
     fullPage: true,

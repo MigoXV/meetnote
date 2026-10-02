@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from meetnote.domain.transcripts import Transcript
@@ -10,7 +11,7 @@ from meetnote.domain.transcripts import Transcript
 def read_transcripts(directory: Path) -> list[Transcript]:
     path = directory / "transcripts.jsonl"
     if not path.exists():
-        return []
+        return read_formal(directory)
     return [
         Transcript.model_validate_json(line)
         for line in path.read_text(encoding="utf-8").splitlines()
@@ -19,6 +20,21 @@ def read_transcripts(directory: Path) -> list[Transcript]:
 
 
 def validate_corpus(directory: Path) -> dict:
+    if (directory / "dataset_manifest.json").exists():
+        samples = {s.id: s for s in read_formal(directory)}
+        manifest = json.loads((directory / "dataset_manifest.json").read_text())
+        checks = 0
+        for item in manifest:
+            sample = samples[item["case_id"]]
+            ids = {s.id for s in sample.segments}
+            gold = json.loads((directory / item["file"]).with_suffix(".gold.json").read_text())
+            if len(gold["checks"]) != item["checks"]:
+                raise ValueError("标注数量不符")
+            for check in gold["checks"]:
+                if not check["source_ids"] or not set(check["source_ids"]) <= ids:
+                    raise ValueError("无效证据引用")
+                checks += 1
+        return {"transcripts": len(samples), "checks": checks, "format": "formal"}
     transcripts = read_transcripts(directory)
     if not transcripts:
         raise ValueError("语料不存在或为空")
@@ -81,3 +97,37 @@ def validate_corpus(directory: Path) -> dict:
         "characters": {t.id: sum(len(s.text) for s in t.segments) for t in transcripts},
         "sha256": hashlib.sha256((directory / "transcripts.jsonl").read_bytes()).hexdigest(),
     }
+
+
+def read_formal(directory: Path) -> list[Transcript]:
+    """仅读取 manifest 指向的原文；不读取 gold 或噪声标注。"""
+    manifest = directory / "dataset_manifest.json"
+    if not manifest.is_file():
+        return []
+    output = []
+    for item in json.loads(manifest.read_text(encoding="utf-8")):
+        path = (directory / item["file"]).resolve()
+        if not path.is_relative_to(directory.resolve()):
+            raise ValueError("语料路径越界")
+        raw = path.read_text(encoding="utf-8")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+            raise ValueError("语料校验失败: " + item["case_id"])
+        segments = []
+        for match in re.finditer(
+            r"^\[(u\d+)\]\s*([^：:\n]+)[：:]\s*(.*?)(?=^\[u\d+\]|\Z)", raw, re.M | re.S
+        ):
+            segments.append({"id": match[1], "speaker": match[2].strip(), "text": match[3].strip()})
+        if len(segments) != item["utterances"]:
+            raise ValueError("语料片段数不符: " + item["case_id"])
+        date = re.search(r"(20\d{2})年(\d{1,2})月(\d{1,2})日", raw.split("[u", 1)[0])
+        output.append(
+            Transcript(
+                id=item["case_id"],
+                meeting_id=item["case_id"],
+                variant="formal",
+                title=item["title"],
+                meeting_date=f"{date[1]}-{int(date[2]):02d}-{int(date[3]):02d}" if date else "",
+                segments=segments,
+            )
+        )
+    return output

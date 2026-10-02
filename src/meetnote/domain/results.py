@@ -1,100 +1,208 @@
-"""模型输出契约；业务字段说明同时进入 JSON Schema。"""
+"""证据、事实修订与交付契约；字段说明同时进入模型 Schema。"""
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 
 class Result(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class Action(Result):
+class FactContent(Result):
+    text: str = Field(
+        min_length=1, description="完整保留数字、单位、否定、适用范围及不确定性的一条事实"
+    )
+    topic: str = Field(min_length=1, description="简短议题")
+    subject: str = Field(
+        min_length=1,
+        description="具体对象及属性，如采购预算、采购数量、交付日期；省略各条共有的项目名，不复述整句",
+    )
     owner: str = Field(
-        description="仅限原文明示分工或本人承诺的负责人；发言人不自动是负责人，未知时为空"
+        default="",
+        description="已确认的行动、执行决定或执行约束可填明示执行负责人；建议提出者不是执行负责人",
     )
-    task: str = Field(description="已确认的行动，不把建议当作承诺")
-    due_date: str = Field(default="", description="原文给出的期限；未知时为空")
-
-
-class SummaryAtom(Result):
-    summary: str = Field(min_length=1, description="一到三句话概括已闭合内容")
-    key_points: list[str] = Field(default_factory=list)
-    keywords: list[str] = Field(
-        default_factory=list, description="简短专名或主题，不能写完整事实句"
+    due: str = Field(
+        default="",
+        description="原文任务期限、活动安排时间或约定时长，未知为空；没有日期依据不补年份",
     )
-    decisions: list[str] = Field(default_factory=list)
-    actions: list[Action] = Field(default_factory=list)
-    open_questions: list[str] = Field(default_factory=list)
-
-
-class BoundaryDecision(Result):
-    should_emit: bool
-    meeting_end: bool = False
-    summary_end_anchor: str = Field(
-        default="", description="已摘要前缀的最后一段逐字原文，足够长以唯一定位"
+    source_ids: list[str] = Field(min_length=1, description="支持整条事实的输入片段 ID")
+    owner_source_ids: list[str] = Field(
+        default_factory=list,
+        description="owner 非空时必须填写其明确分工证据 ID；owner 为空时为空列表",
     )
-    summary_atoms: list[SummaryAtom] = Field(default_factory=list)
-    remaining_text: str = Field(
-        default="", description="尚未摘要部分开头20到80字，逐字复制；已全部摘要时为空"
+    due_source_ids: list[str] = Field(
+        default_factory=list, description="due 非空时必须填写期限证据 ID；due 为空时为空列表"
     )
-    carry_context_note: str = ""
-    reason: str = ""
 
 
-class Signal(Result):
-    semantic_hints: list[str] = Field(default_factory=list)
-    asr_risks: list[str] = Field(default_factory=list)
-    open_slots: list[str] = Field(default_factory=list)
-    commit_level: Literal["none", "low", "mid", "high", "force"] = Field(
-        default="none", description="none、low、mid、high 或 force"
+class FactInput(FactContent):
+    kind: Literal["fact", "proposal", "decision", "action", "constraint", "question", "risk"]
+    status: Literal["confirmed", "proposed", "unresolved"]
+
+
+CATEGORIES = {
+    "已确认事实": ("fact", "confirmed"),
+    "未确认信息": ("fact", "unresolved"),
+    "待批准建议": ("proposal", "proposed"),
+    "已定决定": ("decision", "confirmed"),
+    "已分配行动": ("action", "confirmed"),
+    "已定约束": ("constraint", "confirmed"),
+    "未决问题": ("question", "unresolved"),
+    "风险": ("risk", "unresolved"),
+}
+
+
+class Classification(Result):
+    category: Literal[tuple(CATEGORIES)] = Field(
+        description="明确‘某事由某人负责’或点名执行是已分配行动，不选已确认事实。‘我会…’‘我还会…’‘我准备材料时会…’也是已分配行动，执行人对应 speaker。取消建议选已定决定；只有尚未通过的建议选待批准建议。已确认事实不填写执行负责人。"
     )
-    commit_points: float = Field(default=0, ge=0, le=3)
-    risk_if_skip: Literal["low", "medium", "high"] = "low"
-    force_commit_if: list[str] = Field(default_factory=list)
 
 
-class MeetingLens(Result):
-    orientation: list[str] = Field(default_factory=list)
-    organization_axis: str = "topic"
-    confidence: float = Field(default=0, ge=0, le=1)
-    unstable_parts: list[str] = Field(default_factory=list)
+class ExtractedFact(FactContent, Classification):
+    pass
 
 
-class StructureHint(Result):
-    body_axis_hint: str = "topic"
-    section_candidates: list[str] = Field(default_factory=list)
-    evidence_policy_draft: str = ""
-    pending_structure_reason: str = ""
+class IgnoredSource(Result):
+    source_id: str
+    reason: str = Field(min_length=1, description="仅寒暄、无信息重复等无事实内容可忽略，说明依据")
 
 
-class MinutesPlan(Result):
-    body_axis: str = "topic"
-    section_order: list[str] = Field(default_factory=list)
-    key_topics: list[str] = Field(default_factory=list)
-    content_promotion_policy: str = ""
-    evidence_policy: str = ""
-    composer_brief: str = ""
-    uncertainty_policy: str = ""
+class Extraction(Result):
+    facts: list[FactInput]
+    ignored: list[IgnoredSource] = Field(default_factory=list, max_length=32)
 
 
-class Section(Result):
-    title: str
-    items: list[str]
+class SourceExtraction(Result):
+    facts: list[ExtractedFact] = Field(
+        default_factory=list,
+        max_length=48,
+        description="同一命题只选一种分类记录一次；不同状态、属性或负责人的事项分别成条",
+    )
+    ignored_reason: str = Field(default="", description="仅无事实内容可填写忽略原因，否则留空")
+
+
+def extraction_schema(source_ids):
+    """每个原文 ID 都是必填键，避免自由数组跳过输入片段。"""
+    return create_model(
+        "SourceExtractionBatch",
+        __base__=Result,
+        **{sid: (SourceExtraction, ...) for sid in source_ids},
+    )
+
+
+def unpack_extraction(result):
+    facts, ignored, seen = [], [], set()
+    for sid, record in result.model_dump().items():
+        for value in record["facts"]:
+            kind, status = CATEGORIES[value.pop("category")]
+            value.update(kind=kind, status=status)
+            fact = FactInput.model_validate(value)
+            key = fact.model_dump_json()
+            if key not in seen:
+                facts.append(fact)
+                seen.add(key)
+        if record["ignored_reason"]:
+            ignored.append(IgnoredSource(source_id=sid, reason=record["ignored_reason"]))
+    return Extraction(facts=facts, ignored=ignored)
+
+
+class Fact(FactInput):
+    id: str
+    revision: int = 1
+    status: Literal[
+        "confirmed", "proposed", "unresolved", "conflicted", "superseded", "retracted", "resolved"
+    ]
+    related_ids: list[str] = Field(default_factory=list)
+
+
+class Revision(Result):
+    fact_id: str
+    revision: int
+    before: Fact
+    after: Fact
+    reason: str
+    source_ids: list[str]
+
+
+class Relation(Result):
+    new_id: str
+    old_id: str
+    kind: Literal["supersedes", "retracts", "resolves", "conflicts"]
+    source_ids: list[str] = Field(
+        min_length=1, description="必须包含新事实证据；修订/解决关系必须有明确原文依据"
+    )
+    reason: str = Field(min_length=1)
+
+
+class RelationDecision(Result):
+    kind: Literal["none", "supersedes", "retracts", "resolves", "conflicts"]
+    evidence_id: str | None
+    reason: str = Field(max_length=200)
+
+
+def relation_schema(choices, kinds):
+    fields = {}
+    none = create_model(
+        "NoRelation",
+        __base__=RelationDecision,
+        kind=(Literal["none"], ...),
+        evidence_id=(type(None), ...),
+    )
+    for key, ids in choices.items():
+        item = create_model(
+            "Relation_" + key,
+            __base__=RelationDecision,
+            kind=(Literal[tuple(k for k in kinds[key] if k != "none")], ...),
+            evidence_id=(Literal[tuple(ids)], ...),
+        )
+        fields[key] = (none | item, ...)
+    return create_model("RelationBatch", __base__=Result, **fields)
+
+
+class SectionItem(Result):
+    text: str = Field(min_length=1)
+    fact_ids: list[str] = Field(min_length=1)
+
+
+class FieldSupport(Result):
+    owner_supported: bool = Field(description="引用原文明示此人执行这条事项；发言或建议不算分工")
+    due_supported: bool = Field(
+        description="任务期限、活动安排时间、约定时长均可；日期须直接约束该事项，别猜、不推测、不讨论等讨论时间不算任务期限"
+    )
+    reason: str = Field(max_length=240, description="分别指出负责人和期限的原文依据或缺失")
+
+
+def field_support_schema(ids):
+    return create_model(
+        "FieldSupportBatch", __base__=Result, **{fid: (FieldSupport, ...) for fid in ids}
+    )
+
+
+class Chapter(Result):
+    title: str = Field(min_length=1)
+    items: list[SectionItem] = Field(min_length=1)
+
+
+class ChapterSelection(Result):
+    fact_ids: list[str] = Field(
+        min_length=1, max_length=6, description="选择本议题最重要的至多六条事实 ID，不生成新正文"
+    )
+
+
+def chapter_selection_schema(limit):
+    return create_model(
+        "ChapterSelection",
+        __base__=Result,
+        fact_ids=(list[str], Field(min_length=1, max_length=min(6, limit))),
+    )
 
 
 class MinuteDraft(Result):
-    title: str = "会议纪要"
-    markdown: str = Field(min_length=1)
-    sections: list[Section] = Field(default_factory=list)
-    evidence_trace: list[str] = Field(
-        default_factory=list, description="仅引用输入提供的摘要证据ID"
-    )
+    title: str
+    markdown: str
+    sections: list[Chapter]
+    checklist: list[Fact]
+    evidence_trace: list[str]
     delivery_warnings: list[str] = Field(default_factory=list)
-
-
-class CommittedSummary(SummaryAtom):
-    id: str
-    chunk_ids: list[str]
-    start: int
-    end: int
+    coverage: dict[str, int] = Field(default_factory=dict)

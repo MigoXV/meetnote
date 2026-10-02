@@ -54,13 +54,23 @@ class Session:
             "queue_size": self.queue.qsize(),
             "error": self.error,
             "chunks": [c.model_dump(mode="json") for c in self.accepted.values()],
-            "summaries": [s.model_dump(mode="json") for s in knowledge.summaries],
-            "lens": knowledge.lens.model_dump() if knowledge.lens else None,
-            "plan": knowledge.plan.model_dump() if knowledge.plan else None,
-            "plan_revision": knowledge.plan_revision,
-            "minutes": knowledge.draft.model_dump() if knowledge.draft else None,
+            "contract_version": 2,
+            "facts": [f.model_dump(mode="json") for f in knowledge.facts],
+            "revisions": [r.model_dump(mode="json") for r in knowledge.revisions],
+            "sources": [
+                dict(
+                    s.payload(),
+                    chunk_id=s.chunk_id,
+                    start=s.start,
+                    end=s.end,
+                    disposition=stream.dispositions.get(s.id, "pending"),
+                )
+                for s in stream.sources
+            ],
+            "minutes": knowledge.draft.model_dump(mode="json") if knowledge.draft else None,
             "warnings": list(knowledge.warnings),
-            "debt": state["schedule"].debt,
+            "stats": dict(self.engine.context.stats),
+            "meeting_date": self.engine.meeting_date,
             "event_cursor": self.events.sequence,
         }
 
@@ -75,14 +85,16 @@ class SessionManager:
     def start(self) -> None:
         self.janitor = asyncio.create_task(self._cleanup_loop())
 
-    def create(self, title: str = "") -> Session:
+    def create(self, title: str = "", meeting_date: str = "") -> Session:
         if self.closed:
             raise SessionError(503, "service_stopping")
         # 包括短期保留的终态会话，防止快速创建/结束绕开内存上限。
         if len(self.sessions) >= self.settings.max_sessions:
             raise SessionError(429, "session_limit")
         events = EventLog(self.settings.event_count, self.settings.event_bytes)
-        engine = MeetingEngine(Context(self.settings, self.model, events.publish), title)
+        engine = MeetingEngine(
+            Context(self.settings, self.model, events.publish), title, meeting_date
+        )
         session = Session(
             uuid4().hex, title, events, asyncio.Queue(self.settings.queue_size), engine
         )

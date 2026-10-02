@@ -4,6 +4,7 @@ import type { Info, Sample, SessionRow } from "../api";
 
 const variants: Record<string, string> = {
   clean: "理想转写",
+  formal: "正式语料",
   colloquial: "重口语",
   asr_noisy: "识别噪声",
 };

@@ -1,22 +1,56 @@
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { Activity, Check, ChevronRight, FileText, Layers3 } from "lucide-react";
+import { ChevronRight, FileText, Layers3 } from "lucide-react";
 import type { Snapshot } from "../api";
 
+const statusNames: Record<string, string> = {
+  confirmed: "已确认",
+  proposed: "提议",
+  unresolved: "待确认",
+  conflicted: "有冲突",
+  superseded: "已修订",
+  retracted: "已撤销",
+  resolved: "已解决",
+};
+const kindNames: Record<string, string> = {
+  fact: "事实",
+  proposal: "提议",
+  decision: "决定",
+  action: "行动",
+  constraint: "约束",
+  question: "问题",
+  risk: "风险",
+};
 interface Props {
   snapshot: Snapshot | null;
   tab: string;
   setTab: (tab: string) => void;
   focusEvidence: (ids: string[]) => void;
 }
-
 export function ResultsPane({ snapshot, tab, setTab, focusEvidence }: Props) {
+  const [filter, setFilter] = useState("active");
+  const evidence = (ids: string[]) =>
+    focusEvidence([
+      ...new Set(
+        snapshot?.sources
+          .filter((s) => ids.includes(s.id))
+          .map((s) => s.chunk_id) || [],
+      ),
+    ]);
+  const facts = (snapshot?.facts || []).filter(
+    (f) =>
+      filter === "all" ||
+      (filter === "pending"
+        ? ["unresolved", "conflicted"].includes(f.status)
+        : !["superseded", "retracted", "resolved"].includes(f.status)),
+  );
   return (
     <section className="results-pane" aria-label="摘要结果">
       <div className="tabs" role="tablist" aria-label="结果视图">
         {[
-          ["summaries", "实时摘要"],
+          ["summaries", "事实与阶段摘要"],
           ["minutes", "最终纪要"],
-          ["plan", "规划"],
+          ["history", "修订记录"],
         ].map(([key, label]) => (
           <button
             role="tab"
@@ -26,83 +60,56 @@ export function ResultsPane({ snapshot, tab, setTab, focusEvidence }: Props) {
             onClick={() => setTab(key)}
           >
             {label}
-            {key === "summaries" && (
-              <span className="count">{snapshot?.summaries.length || 0}</span>
-            )}
           </button>
         ))}
       </div>
       <div className="results-scroll" role="tabpanel">
-        {tab === "summaries" &&
-          (snapshot?.summaries.length ? (
-            snapshot.summaries.map((summary, i) => (
-              <article className="summary" key={summary.id}>
-                <div className="summary-index">
-                  摘要 {String(i + 1).padStart(2, "0")}
-                  <span>
-                    <Check size={12} />
-                    已提交
-                  </span>
-                </div>
-                <p className="summary-text">{summary.summary}</p>
-                {!!summary.key_points.length && (
-                  <ul>
-                    {summary.key_points.map((point, n) => (
-                      <li key={n}>{point}</li>
-                    ))}
-                  </ul>
-                )}
-                {!!summary.decisions.length && (
-                  <div className="subsection">
-                    <strong>决定</strong>
-                    <ul>
-                      {summary.decisions.map((d, n) => (
-                        <li key={n}>{d}</li>
-                      ))}
-                    </ul>
+        {tab === "summaries" && (
+          <>
+            <label>
+              显示事项{" "}
+              <select
+                aria-label="事实筛选"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              >
+                <option value="active">当前事项</option>
+                <option value="pending">待确认与冲突</option>
+                <option value="all">全部历史</option>
+              </select>
+            </label>
+            {facts.length ? (
+              facts.map((f) => (
+                <article className="summary" key={f.id}>
+                  <div className="summary-index">
+                    {f.topic} · {kindNames[f.kind]}
+                    <span>
+                      {statusNames[f.status]} · v{f.revision}
+                    </span>
                   </div>
-                )}
-                {!!summary.actions.length && (
-                  <div className="subsection">
-                    <strong>行动项</strong>
-                    {summary.actions.map((a, n) => (
-                      <p key={n}>
-                        {a.owner || "负责人待确认"} · {a.task}{" "}
-                        {a.due_date && ` / ${a.due_date}`}
-                      </p>
-                    ))}
-                  </div>
-                )}
-                {!!summary.open_questions.length && (
-                  <div className="subsection">
-                    <strong>待确认</strong>
-                    <ul>
-                      {summary.open_questions.map((q, n) => (
-                        <li key={n}>{q}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                <button
-                  className="text-button"
-                  onClick={() => focusEvidence(summary.chunk_ids)}
-                >
-                  查看 {summary.chunk_ids.length} 段原文依据{" "}
-                  <ChevronRight size={13} />
-                </button>
-              </article>
-            ))
-          ) : (
-            <div className="empty-state">
-              <Layers3 size={32} strokeWidth={1} />
-              <h3>为完整的意思留一点时间</h3>
-              <p>
-                信号与边界确认后，摘要会在这里出现。
-                <br />
-                尚未闭合的内容留待下一轮处理。
-              </p>
-            </div>
-          ))}
+                  <p className="summary-text">{f.text}</p>
+                  {(f.owner || f.due) && (
+                    <p>
+                      负责人：{f.owner || "待确认"} · 期限：{f.due || "待确认"}
+                    </p>
+                  )}
+                  <button
+                    className="text-button"
+                    onClick={() => evidence(f.source_ids)}
+                  >
+                    查看原文依据 <ChevronRight size={13} />
+                  </button>
+                </article>
+              ))
+            ) : (
+              <div className="empty-state">
+                <Layers3 size={32} strokeWidth={1} />
+                <h3>事实随原文逐步形成</h3>
+                <p>处理后的事实会出现在这里，未决内容会明确标注。</p>
+              </div>
+            )}
+          </>
+        )}
         {tab === "minutes" &&
           (snapshot?.minutes ? (
             <article className="minutes">
@@ -120,51 +127,53 @@ export function ResultsPane({ snapshot, tab, setTab, focusEvidence }: Props) {
                 </aside>
               )}
               <div className="evidence-footer">
-                依据：
-                {snapshot.minutes.evidence_trace.join("、") || "参见实时摘要"}
+                事项依据：
+                {snapshot.minutes.evidence_trace.map((id) => {
+                  const f = snapshot.facts.find((fact) => fact.id === id);
+                  return (
+                    <button
+                      className="text-button"
+                      key={id}
+                      onClick={() => evidence(f?.source_ids || [])}
+                    >
+                      {id}
+                    </button>
+                  );
+                })}
               </div>
             </article>
           ) : (
             <div className="empty-state">
               <FileText size={32} strokeWidth={1} />
               <h3>在收尾时生成纪要</h3>
-              <p>
-                点击「收尾」停止输入，待队列处理完成后，
-                <br />
-                引擎会整理整场会议的证据与规划。
-              </p>
+              <p>完整处理原文后，生成简明正文与完整事项清单。</p>
             </div>
           ))}
-        {tab === "plan" &&
-          (snapshot?.plan ? (
-            <div className="plan-view">
-              <div className="eyebrow">规划修订 {snapshot.plan_revision}</div>
-              {Object.entries(snapshot.plan).map(([key, value]) => (
-                <div key={key}>
-                  <h3>
-                    {(
-                      {
-                        body_axis: "组织主轴",
-                        section_order: "章节安排",
-                        key_topics: "关键议题",
-                        content_promotion_policy: "结论采纳规则",
-                        evidence_policy: "证据规则",
-                        composer_brief: "写作简报",
-                        uncertainty_policy: "不确定性处理",
-                      } as Record<string, string>
-                    )[key] || key}
-                  </h3>
-                  <p>
-                    {Array.isArray(value) ? value.join(" · ") : String(value)}
-                  </p>
+        {tab === "history" &&
+          (snapshot?.revisions.length ? (
+            snapshot.revisions.map((r) => (
+              <article className="summary" key={`${r.fact_id}:${r.revision}`}>
+                <div className="summary-index">
+                  {r.fact_id} · v{r.revision}
                 </div>
-              ))}
-            </div>
+                <p>
+                  {statusNames[r.before.status]} → {statusNames[r.after.status]}
+                </p>
+                <p>{r.reason}</p>
+                <p>{r.before.text}</p>
+                <p>{r.after.text}</p>
+                <button
+                  className="text-button"
+                  onClick={() => evidence(r.source_ids)}
+                >
+                  查看修订依据
+                </button>
+              </article>
+            ))
           ) : (
             <div className="empty-state">
-              <Activity size={32} strokeWidth={1} />
-              <h3>规划随证据形成</h3>
-              <p>累积摘要后，会议方向与章节提示将逐步更新。</p>
+              <h3>暂无修订</h3>
+              <p>改口、问题关闭和冲突处理会保留在这里。</p>
             </div>
           ))}
       </div>

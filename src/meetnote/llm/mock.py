@@ -1,47 +1,71 @@
-"""可重复的接线测试模型，输出明确标识为模拟结果。"""
-
-from typing import TypeVar
-
-from pydantic import BaseModel
-
-T = TypeVar("T", bound=BaseModel)
+"""仅验证接线的可重复替身，不能用来测量模型事实准确率。"""
 
 
 class MockClient:
-    async def generate(self, task: str, instructions: str, context: dict, schema: type[T]) -> T:
-        data: dict
-        if task == "marker":
-            data = {"commit_points": 2, "commit_level": "mid", "semantic_hints": ["模拟会议"]}
-        elif task == "summary":
-            text = context["buffer_text"]
+    async def generate(self, task, instructions, context, schema):
+        if task == "extract":
             data = {
-                "should_emit": True,
-                "summary_end_anchor": text[-100:],
-                "summary_atoms": [
-                    {"summary": "[模拟摘要] " + text, "key_points": [text], "keywords": []}
+                "facts": [
+                    {
+                        "text": "[模拟] " + s["text"],
+                        "kind": "fact",
+                        "topic": "模拟会议",
+                        "subject": "模拟",
+                        "status": "confirmed",
+                        "source_ids": [s["id"]],
+                    }
+                    for s in context["sources"]
                 ],
-                "remaining_text": "",
+                "ignored": [],
             }
-        elif task == "lens":
-            data = {"orientation": ["会议讨论"], "confidence": 0.8}
-        elif task == "hint":
-            data = {"section_candidates": ["会议要点", "行动与待确认"]}
-        elif task == "plan":
+        elif task == "reconcile":
+            data = {"relations": []}
+        elif task == "chapter":
             data = {
-                "section_order": ["会议要点", "待确认"],
-                "composer_brief": "[模拟] 根据已提交摘要整理",
+                "fact_ids": list(
+                    dict.fromkeys(fid for item in context["items"] for fid in item["fact_ids"])
+                )[: context.get("selection_limit", 6)]
             }
-        elif task == "compose":
-            summaries = context["summaries"]
+        elif task == "fields":
             data = {
-                "title": context.get("title") or "模拟会议纪要",
-                "markdown": "# 模拟会议纪要\n\n" + "\n\n".join(s["summary"] for s in summaries),
-                "evidence_trace": [s["id"] for s in summaries],
-                "delivery_warnings": ["此结果来自 mock，仅用于验证接线，不代表摘要质量。"],
+                f["id"]: {"owner_supported": True, "due_supported": True, "reason": "模拟字段核对"}
+                for f in context["claims"]
             }
         else:
             raise ValueError(task)
-        return schema.model_validate(data)
+        return mock_result(task, context, schema, data)
 
-    async def close(self) -> None:
+    async def close(self):
         pass
+
+
+def mock_result(task, context, schema, data):
+    if task == "extract" and "facts" not in schema.model_fields:
+        from meetnote.domain.results import CATEGORIES
+
+        categories = {pair: name for name, pair in CATEGORIES.items()}
+        ids = [s["id"] for s in context["sources"]]
+        records = {sid: {"facts": [], "ignored_reason": ""} for sid in ids}
+        for fact in data["facts"]:
+            fact = dict(fact)
+            fact["category"] = categories[(fact.pop("kind"), fact.pop("status"))]
+            sid = next((sid for sid in fact["source_ids"] if sid in records), ids[0])
+            records[sid]["facts"].append(fact)
+        for ignored in data.get("ignored", []):
+            records[ignored["source_id"]]["ignored_reason"] = ignored["reason"]
+        data = records
+    if task == "reconcile" and "relations" not in schema.model_fields:
+        records = {
+            key: {"kind": "none", "evidence_id": None, "reason": "无修订关系"}
+            for key in context["pairs"]
+        }
+        for relation in data["relations"]:
+            for key, pair in context["pairs"].items():
+                if (pair["new_id"], pair["old_id"]) == (relation["new_id"], relation["old_id"]):
+                    records[key] = {
+                        "kind": relation["kind"],
+                        "evidence_id": pair["evidence_ids"][0],
+                        "reason": relation["reason"],
+                    }
+        data = records
+    return schema.model_validate(data)

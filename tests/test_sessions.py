@@ -101,7 +101,7 @@ async def test_service_does_not_write_meeting_files(tmp_path, monkeypatch):
 
 
 async def test_idle_checkpoint_runs_without_next_input():
-    service = manager(min_chars=5, window_chars=700, checkpoint_seconds=0.01)
+    service = manager(checkpoint_seconds=0.01)
     session = service.create()
     await service.append(session.id, ChunkInput(text="周四完成验收，陈宁负责。"))
     for _ in range(100):

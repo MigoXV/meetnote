@@ -12,7 +12,7 @@ from meetnote.corpus.reader import read_transcripts, validate_corpus
 from meetnote.domain.transcripts import ChunkInput
 from meetnote.llm.client import ResponsesClient
 from meetnote.llm.mock import MockClient
-from meetnote.sessions.manager import SessionManager
+from meetnote.sessions.manager import SessionError, SessionManager
 
 app = typer.Typer(no_args_is_help=True, help="MeetNote：会议摘要 sidecar")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
@@ -65,12 +65,21 @@ def replay(
         model = MockClient() if settings.provider == "mock" else ResponsesClient(settings)
         manager = SessionManager(settings, model)
         try:
-            session = manager.create(sample.title)
+            session = manager.create(sample.title, sample.meeting_date)
             for segment in sample.segments:
-                await manager.append(
-                    session.id,
-                    ChunkInput(chunk_id=segment.id, text=segment.text, speaker=segment.speaker),
-                )
+                while True:
+                    try:
+                        await manager.append(
+                            session.id,
+                            ChunkInput(
+                                chunk_id=segment.id, text=segment.text, speaker=segment.speaker
+                            ),
+                        )
+                        break
+                    except SessionError as exc:
+                        if exc.code != "input_queue_full":
+                            raise
+                        await asyncio.sleep(0.05)
             await manager.finalize(session.id)
             await session.task
             typer.echo(json.dumps(session.snapshot(), ensure_ascii=False, indent=2))
@@ -80,6 +89,52 @@ def replay(
             await manager.close()
 
     asyncio.run(run())
+
+
+@app.command("check-short")
+def check_short(
+    case: Annotated[list[str] | None, typer.Option(help="只运行指定短案例，可重复指定")] = None,
+):
+    """显式调用真实 Responses 服务，结果仅输出到标准输出。"""
+    from meetnote.evaluation.short import CASES, run_short
+
+    names = case or list(CASES)
+    if any(name not in CASES for name in names):
+        raise typer.BadParameter("未知短案例，可用：" + ", ".join(CASES))
+    if asyncio.run(run_short(Settings(), names, typer.echo)):
+        raise typer.Exit(1)
+
+
+@app.command("evaluate-formal")
+def evaluate_formal(
+    case: Annotated[list[str], typer.Option(help="正式语料 ID，可重复指定")],
+    directory: Annotated[Path, typer.Option()] = Path("data-bin/data"),
+):
+    """最后阶段的长会议验收。须先通过离线测试与 check-short。"""
+    from meetnote.evaluation.formal import run_formal
+
+    samples = {s.id for s in read_transcripts(directory)}
+    if any(name not in samples for name in case):
+        raise typer.BadParameter("正式语料 ID 不存在")
+    if asyncio.run(run_formal(Settings(), directory, case, typer.echo)):
+        raise typer.Exit(1)
+
+
+@app.command("check-fragment")
+def check_fragment(
+    case: Annotated[str, typer.Option()],
+    segments: Annotated[int, typer.Option(min=1, max=20)] = 12,
+    start_segment: Annotated[int, typer.Option(min=1, help="从第几条发言开始（从 1 计数）")] = 1,
+    directory: Annotated[Path, typer.Option()] = Path("data-bin/data"),
+):
+    """只跑长会的局部发言，用于复现批量错误；不计为整场验收。"""
+    from meetnote.evaluation.formal import run_formal
+
+    samples = {s.id: s for s in read_transcripts(directory)}
+    if case not in samples or start_segment > len(samples[case].segments):
+        raise typer.BadParameter("样本或起始发言不存在")
+    if asyncio.run(run_formal(Settings(), directory, [case], typer.echo, segments, start_segment)):
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

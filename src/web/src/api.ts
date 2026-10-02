@@ -15,15 +15,32 @@ export interface Chunk {
   speaker: string | null;
   seq: number;
 }
-export interface Summary {
+export interface Fact {
   id: string;
-  summary: string;
-  key_points: string[];
-  keywords: string[];
-  decisions: string[];
-  actions: { owner: string; task: string; due_date: string }[];
-  open_questions: string[];
-  chunk_ids: string[];
+  revision: number;
+  text: string;
+  kind: string;
+  status: string;
+  topic: string;
+  subject: string;
+  owner: string;
+  due: string;
+  source_ids: string[];
+  related_ids: string[];
+}
+export interface Source {
+  id: string;
+  chunk_id: string;
+  text: string;
+  disposition: string;
+}
+export interface Revision {
+  fact_id: string;
+  revision: number;
+  before: Fact;
+  after: Fact;
+  reason: string;
+  source_ids: string[];
 }
 export interface Minutes {
   title: string;
@@ -43,12 +60,14 @@ export interface Snapshot extends SessionRow {
   queue_size: number;
   error: string | null;
   chunks: Chunk[];
-  summaries: Summary[];
+  contract_version: number;
+  facts: Fact[];
+  sources: Source[];
+  revisions: Revision[];
+  stats: Record<string, number>;
+  meeting_date: string;
   minutes: Minutes | null;
   warnings: string[];
-  debt: number;
-  plan: Record<string, unknown> | null;
-  plan_revision: number;
   event_cursor: number;
 }
 export interface Sample {
@@ -60,6 +79,7 @@ export interface Sample {
   characters: number;
 }
 export interface Transcript {
+  meeting_date: string;
   id: string;
   title: string;
   segments: { id: string; speaker: string; text: string }[];
