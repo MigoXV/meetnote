@@ -59,7 +59,7 @@ async def test_responses_wire_contract_and_validation_correction():
         max_retries=0,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    client = ResponsesClient(Settings(_env_file=None), sdk)
+    client = ResponsesClient(Settings(_env_file=None, provider="mock"), sdk)
     answer = await client.generate("probe", "Return JSON.", {"text": "输入"}, Answer)
     assert answer.ok
     assert len(requests) == 2
@@ -72,6 +72,8 @@ async def test_responses_wire_contract_and_validation_correction():
 
 
 async def test_truncated_stream_is_not_success():
+    from meetnote.engine.context import Context
+
     sdk = openai.AsyncOpenAI(
         api_key="local",
         base_url="http://test/v1",
@@ -86,9 +88,15 @@ async def test_truncated_stream_is_not_success():
             )
         ),
     )
-    client = ResponsesClient(Settings(_env_file=None), sdk)
+    settings = Settings(_env_file=None, provider="mock")
+    client = ResponsesClient(settings, sdk)
+    events = []
+    context = Context(settings, client, lambda k, d: events.append((k, d)))
     with pytest.raises(ModelFailure, match="response.incomplete"):
-        await client.generate("probe", "Return JSON.", {}, Answer)
+        await context.invoke("chapter", {}, Answer)
+    request = next(data for kind, data in events if kind == "model.request")
+    assert request["partial_output_tail"] == '{"ok":true}'
+    assert not context.cache
     await client.close()
 
 
@@ -106,11 +114,35 @@ async def test_network_failure_retried_once():
         max_retries=0,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    client = ResponsesClient(Settings(_env_file=None), sdk)
+    client = ResponsesClient(Settings(_env_file=None, provider="mock"), sdk)
     with pytest.raises(ModelFailure, match="model_unavailable"):
         await client.generate("probe", "Return JSON.", {}, Answer)
     assert calls == 2
     await client.close()
+
+
+@pytest.mark.parametrize("runaway", [" " * 300, "x" * 1800])
+async def test_runaway_stream_is_cancelled_without_accepting_partial_output(runaway):
+    sdk = openai.AsyncOpenAI(
+        api_key="local",
+        base_url="http://test/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    text=sse(runaway),
+                )
+            )
+        ),
+    )
+    client = ResponsesClient(Settings(_env_file=None, provider="mock"), sdk)
+    try:
+        with pytest.raises(ModelFailure, match="response_incomplete"):
+            await client.generate("probe", "Return JSON.", {}, Answer)
+    finally:
+        await client.close()
 
 
 async def test_cancel_closes_stream():
@@ -134,10 +166,73 @@ async def test_cancel_closes_stream():
         return Stream()
 
     transport = SimpleNamespace(responses=SimpleNamespace(create=create))
-    client = ResponsesClient(Settings(_env_file=None), transport)
+    client = ResponsesClient(Settings(_env_file=None, provider="mock"), transport)
     task = asyncio.create_task(client.generate("probe", "JSON", {}, Answer))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert closed
+
+
+async def test_usage_and_incomplete_reason_are_observable():
+    from meetnote.engine.context import Context
+
+    wire = sse('{"ok":true}')
+    wire = wire.replace(
+        '"output": []',
+        '"output": [], "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15, "input_tokens_details": {"cached_tokens": 8}, "output_tokens_details": {"reasoning_tokens": 0}}',
+    )
+    sdk = openai.AsyncOpenAI(
+        api_key="local",
+        base_url="http://test/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200, headers={"content-type": "text/event-stream"}, text=wire
+                )
+            )
+        ),
+    )
+    settings = Settings(_env_file=None, provider="mock")
+    client = ResponsesClient(settings, sdk)
+    events = []
+    ctx = Context(settings, client, lambda k, d: events.append((k, d)))
+    await ctx.invoke("chapter", {"items": []}, Answer)
+    assert ctx.stats["requests"] == 1
+    assert ctx.stats["input_tokens"] == 12
+    assert ctx.stats["cached_tokens"] == 8
+    assert ctx.stats["usage_unknown"] == 0
+    assert next(d for k, d in events if k == "model.request")["response_id"] == "resp_1"
+    await client.close()
+
+
+async def test_request_metrics_record_first_output_and_task_totals():
+    from meetnote.engine.context import Context
+
+    sdk = openai.AsyncOpenAI(
+        api_key="local",
+        base_url="http://test/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200, headers={"content-type": "text/event-stream"}, text=sse('{"ok":true}')
+                )
+            )
+        ),
+    )
+    client = ResponsesClient(Settings(_env_file=None), sdk)
+    records = []
+    context = Context(
+        Settings(_env_file=None), client, lambda kind, data: records.append((kind, data))
+    )
+    context.prompt = lambda _: "Return JSON."
+    await context.invoke("probe", {}, Answer)
+    metrics = context.stats["by_task"]["probe"]
+    assert metrics["requests"] == 1
+    assert metrics["errors"] == 0
+    assert len(metrics["first_output_ms"]) == 1
+    assert 0 <= metrics["first_output_ms"][0] <= metrics["elapsed_ms"]
+    await client.close()

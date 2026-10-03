@@ -2,19 +2,13 @@ import { Activity, ArrowDown, Check, Circle, X } from "lucide-react";
 import type { Info, RunEvent, Snapshot } from "../api";
 
 const nodeNames: Record<string, string> = {
-  bucket_accumulator: "原文接收",
-  cycle_slice_builder: "检查点切片",
-  fallback_guard: "可用性检查",
-  llm_signal_marker: "语义信号",
-  commit_debt_meter: "债务累计",
-  work_candidate_builder: "候选任务",
-  model_work_scheduler: "模型调度",
-  meeting_lens_builder: "会议方向",
-  template_planner: "结构提示",
-  summary_worker: "局部摘要",
-  bucket_enricher: "证据整理",
-  main_minutes_planner: "纪要规划",
-  minutes_composer: "纪要生成",
+  ingest: "原文接收",
+  extract: "事实抽取",
+  fields: "分工与期限核验",
+  reconcile: "修订核对",
+  commit: "证据提交",
+  chapter: "分区成文",
+  render: "清单与纪要",
 };
 
 interface Props {
@@ -36,7 +30,8 @@ export function Pipeline({ info, snapshot, events, connection }: Props) {
         </h2>
         <span>{connection}</span>
         <span className="pipeline-stats">
-          债务 {snapshot?.debt.toFixed(1) || "0.0"} / 3 · 待处理{" "}
+          事实 {snapshot?.facts.length || 0} · 调用{" "}
+          {snapshot?.stats.requests || 0} · 待处理{" "}
           {snapshot?.remaining_chars || 0} 字
         </span>
       </div>

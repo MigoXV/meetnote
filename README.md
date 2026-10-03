@@ -1,168 +1,194 @@
 # MeetNote
 
-会议摘要 sidecar。接收定稿转写，运行十三节点摘要链路，通过 HTTP 和 SSE 返回摘要及纪要。所有会话仅保存在内存。
+MeetNote 是仅存内存的会议纪要 sidecar。接收定稿转写，持续抽取带原文证据的事实、决定、行动和未决事项，收尾后交付简明正文与完整事项清单。HTTP、CLI 与评估入口共用 `MeetingEngine`。
 
-Web 页面是调试工作台：回放合成会议、手工提交文本、查看原文和摘要依据、观察节点与模型调用、收尾生成纪要。采用苍渊·白垣主题，默认苍渊。
+## 安装与启动
 
-## 安装与运行
-
-开发环境需要 Python 3.10、Poetry、Node.js 22.12+（当前使用 Node.js 24）和 pnpm。
+需要 Python 3.10、Poetry、Node.js 22.12+ 和 pnpm。
 
 ```bash
-cd /workspace/sidecars/meetnote
-poetry env use python3.10
 poetry install
 pnpm --dir src/web install
 pnpm --dir src/web run build
 poetry run meetnote serve
 ```
 
-打开 `http://127.0.0.1:8010`，接口文档位于 `/docs`。后端统一托管 `src/web/dist`，这是标准启动方式；部署目录必须包含该构建产物，缺失时启动明确失败。源码检出目录是完整工作台的部署单位；`poetry build` 生成的 Python 包包含引擎、API 与 Prompt，不包含前端构建资源。
+访问 `http://127.0.0.1:8010`，API 文档位于 `/docs`。后端托管 `src/web/dist`；缺少构建产物时明确启动失败。VS Code 服务调试会先构建前端。`poetry build` 的 Python 包包含引擎和 Prompt，不包含前端构建产物。
 
-默认连接 `http://192.168.0.222:10001/v1/responses`，模型为 `spark25`。每次调用都发送 `store=false`，不依赖服务端历史。上游服务的运行日志由其自身管理。
-
-无模型接线检查：
+默认调用 `http://192.168.0.222:10001/v1/responses`，服务模型名为 `spark25`，使用流式 Responses、严格 JSON Schema、`store=false`、`enable_thinking=false`。不依赖服务端对话历史；`store=false` 不代表关闭前缀缓存。
 
 ```bash
 poetry run meetnote serve --mock
 ```
 
-mock 输出有明确标记，只用于验证接线，不能衡量摘要质量。VS Code 的「MeetNote 服务」会先执行 `web: build`，所有调试入口读取 `.env`。
+mock 只验证接线，输出带“模拟”标记，不能用于证明事实准确率。工作台沿用苍渊·白垣双主题，浏览器不保存会话。
+
+## 处理机制
+
+1. 优先保留完整发言，超预算时按句子边界建立稳定子片段 ID，保留原文、说话人、时间与字符位置；超长片段按 tokenizer 预算切分。
+2. 抽取输出以本批每个片段 ID 为必填键，逐段填写事实或忽略依据，再汇入账本。模型只选一次语义分类，程序展开类型和状态，避免生成“已确认的风险”等非法组合。负责人和期限有独立证据引用；执行决定和执行约束也可有明示负责人。未闭合内容可以进入未决状态。代词分工只在引用原文中有唯一且不在引号内的对应分工句时，补入其紧邻前句，逐字保留要求、数字与条件；不能用模型生成的简短主题替代任务内容。
+3. 校验每段处理归属、证据范围和状态后，先由程序验证可逐字对应的第一人称执行分工；其余非空负责人和期限以每次最多 6 条的小任务独立核验是否确实属于该事项；不支持的字段清空并发布 `fields.corrected` 事件，原文及事实正文保留。核验请求失败不提交。全部通过后原子提交事实与处理位置。纯空白由程序处理；失败不越过原文，取消不提交候选结果。
+4. 从内存索引召回同对象事实，相似度仅用于召回，不用于删除事实；按预算且每次最多六个候选对核对修订、撤销、问题关闭和冲突。程序建立原文证据句 ID，Schema 限定每对可选的证据和操作，模型不复制原句或事实 ID。每对新旧命题并排提供，带旧安排引文时限定匹配范围，避免相邻对象的相同数字互相覆盖。重复确认的候选事实仅提供首次与最近证据用于比对，完整引用仍在账本。关键词重合不能删除信息；只有精确命题及字段匹配，或共享证据的逐字同义标签扩展，才合并引用。修订保留历史，冲突不静默择一；没有明确修订／分歧原文依据时原事实并存。
+5. 工作台展示当前事实与修订记录。收尾先为修订后的现行安排保留名额，决定、行动、未决事项和约束轮流分配正文名额；有负责人和期限的行动优先，背景事实只用剩余额度。每类按请求预算且每页最多 24 条分页、逐层保留类型选择重点，再按议题组织正文。正文最多 18 条要点；完整事项清单不受此限制。
+6. 章节筛选只选择事实 ID；纪要生成和复核随后基于对应原始发言生成可读正文。两次成文请求均以 Schema 限定可引用的事实 ID，仍校验引用、重复段落和内部标签；完整事项清单保留在结果结构中。章节筛选失败可回退事实列表，正式纪要生成或复核失败则明确报错，不发布完成状态。
+
+没有新增输入时不重复抽取，也不重复累计调度分数。旧十三节点、Marker、Lens、债务和复制文本锚点机制已移除。
+结构或语义校验重试后仍失败时，有界拆小当前批次；短发言包含多个句子时也可沿句末标点拆分，保持原文与位置连续。核实计划不能当作核实结果来关闭风险。
+
+每次模型请求有界，但会话原文和账本随输入增长。默认累计文本配额是内存保护，不代表无限长会议；不提供跨重启恢复、数据库或宿主检查点。
 
 ## 配置
 
-可复制 `.env.example` 为 `.env`；配置优先级为显式构造参数、环境变量、`.env`、默认值。`--mock` 显式覆盖模型类型，主机及端口由 CLI 参数或对应环境变量设置。
+复制 `.env.example` 为 `.env`。优先级：显式参数、环境变量、`.env`、默认值。
 
-| 环境变量 | 默认值 | 用途 |
+| 环境变量 | 默认值 | 含义 |
 | --- | --- | --- |
 | `MEETNOTE_PROVIDER` | `responses` | `responses` 或显式 `mock` |
-| `MEETNOTE_BASE_URL` | `http://192.168.0.222:10001/v1` | Responses API 根地址 |
-| `MEETNOTE_MODEL` | `spark25` | 模型 ID |
-| `MEETNOTE_API_KEY` | `local` | 请求凭据，仅留在服务端 |
-| `MEETNOTE_THINKING` | `false` | 目标服务的 `enable_thinking` |
-| `MEETNOTE_MODEL_TIMEOUT` | `240` | 单次模型请求超时，秒 |
-| `MEETNOTE_MODEL_CONCURRENCY` | `4` | 全进程模型并发上限 |
-| `MEETNOTE_MAX_OUTPUT_TOKENS` | `4096` | 每次模型输出上限 |
-| `MEETNOTE_MIN_CHARS` | `50` | 普通检查点最小字数 |
-| `MEETNOTE_WINDOW_CHARS` | `700` | 每轮最大原文窗口 |
-| `MEETNOTE_CHECKPOINT_SECONDS` | `9` | 普通检查点间隔，秒 |
-| `MEETNOTE_MAX_SESSIONS` | `32` | 内存会话上限，含短期保留的终态 |
-| `MEETNOTE_QUEUE_SIZE` | `256` | 每会话等待消费的片段上限 |
-| `MEETNOTE_MAX_SESSION_CHARS` | `200000` | 每会话累计输入字数上限 |
-| `MEETNOTE_IDLE_SECONDS` | `1800` | 运行会话无新输入的取消期限 |
-| `MEETNOTE_RETENTION_SECONDS` | `300` | 终态会话保留时间 |
-| `MEETNOTE_EVENT_COUNT` / `MEETNOTE_EVENT_BYTES` | `1024` / `4194304` | 每会话事件缓存双重上限 |
-| `MEETNOTE_CORPUS_DIR` | `/workspace/model-bin/meetnote` | 只读合成语料目录 |
-| `MEETNOTE_HOST` / `MEETNOTE_PORT` | `127.0.0.1` / `8010` | CLI 监听地址 |
+| `MEETNOTE_BASE_URL` | `http://192.168.0.222:10001/v1` | 上游地址 |
+| `MEETNOTE_MODEL` | `spark25` | 服务模型名 |
+| `MEETNOTE_API_KEY` | `local` | 仅服务端持有 |
+| `MEETNOTE_THINKING` | `false` | 上游思考开关 |
+| `MEETNOTE_TEMPERATURE` | `0` | 默认减少采样变化，仍不保证上游逐次结果完全相同 |
+| `MEETNOTE_TOKENIZER_PATH` | `/workspace/model-bin/XHToken/Spark-X2.5-4B-INT8/tokenizer.json` | 本地 tokenizer；不会下载或加载模型权重 |
+| `MEETNOTE_BODY_MAX_ITEMS` | `18` | 成文候选要点上限，完整事项清单不截断 |
+| `MEETNOTE_BATCH_TOKENS` | `768` | 原文批次目标 |
+| `MEETNOTE_BATCH_SOURCES` | `12` | 单批片段上限，控制结构化输出开销 |
+| `MEETNOTE_SOURCE_TOKENS` | `384` | 原文子片段上限 |
+| `MEETNOTE_INPUT_TOKEN_BUDGET` | `8192` | 指令、输入与 Schema 的合计估算上限 |
+| `MEETNOTE_PROTOCOL_TOKEN_RESERVE` | `1024` | 协议与模板余量 |
+| `MEETNOTE_CONTEXT_TOKENS` | `128000` | 部署上下文限额，不从模型权重声明推断 |
+| `MEETNOTE_MAX_OUTPUT_TOKENS` | `4096` | 输出上限；抽取之外的任务额外限制为 2048 |
+| `MEETNOTE_CHECKPOINT_SECONDS` | `9` | 低流量检查点间隔 |
+| `MEETNOTE_MODEL_TIMEOUT` | `240` | 单次请求超时，秒 |
+| `MEETNOTE_MODEL_CONCURRENCY` | `2` | 共享主模型客户端的请求并发上限 |
+| `MEETNOTE_EXTRACTION_WINDOW` | `1` | 每会话抽取窗口，1～4；执行中和等待提交的批次共同占用窗口 |
+| `MEETNOTE_LOCAL_EXTRACTION_RETRY` | `false` | 仅纠正能够明确定位到原文记录的抽取错误；合并后仍完整校验 |
+| `MEETNOTE_PARALLEL_CHAPTERS` | `false` | 并行独立类别及同轮分页筛选；纪要生成与复核仍串行 |
+| `MEETNOTE_CACHE_ENTRIES` / `MEETNOTE_CACHE_BYTES` | `128` / `8388608` | 每会话内存结果缓存上限；设为零禁用 |
+| `MEETNOTE_MAX_SESSIONS` | `32` | 会话容量 |
+| `MEETNOTE_QUEUE_SIZE` | `256` | 每会话输入队列容量 |
+| `MEETNOTE_MAX_SESSION_CHARS` | `200000` | 累计输入字符限额 |
+| `MEETNOTE_IDLE_SECONDS` / `MEETNOTE_RETENTION_SECONDS` | `1800` / `300` | 空闲取消与终态保留时间 |
+| `MEETNOTE_EVENT_COUNT` / `MEETNOTE_EVENT_BYTES` | `1024` / `4194304` | 每会话事件缓存上限 |
+| `MEETNOTE_CORPUS_DIR` | `/workspace/model-bin/meetnote` | 只读语料目录；可指定 `data-bin/data` |
+| `MEETNOTE_HOST` / `MEETNOTE_PORT` | `127.0.0.1` / `8010` | 服务监听地址 |
 
-首版按单进程 sidecar 运行，没有账号、数据库、跨进程会话共享或 ASR 中间结果修订。由宿主处理用户管理及最终结果保存。
+旧 `MIN_CHARS` 和 `WINDOW_CHARS` 配置已移除。更换服务模型时必须同步配置 tokenizer 与上下文限额，并重新运行短测。输入 token 数是本地估算，实际 usage 来自上游；两者不能混作同一指标。
 
-## 接口与生命周期
+网络故障重试一次，结构错误最多纠正一次，业务引用／覆盖校验最多纠正一次。抽取截断、业务校验纠正失败或超预算最多拆分四层（默认 12 段批次可退到单段），不能再安全拆分时明确失败。仅引用已处理前文的重述不会作为新事实，也不能满足本批覆盖。修订核对截断时进一步拆成更小的事实对；单对最多补试一次，仍失败则保留未消费原文并明确失败。缓存仅复用通过校验的任务结果，键覆盖模型配置、tokenizer 指纹、Prompt、Schema、完整输入与解码配置；不会缓存失败响应。
 
-| 方法及路径 | 行为 |
+## 调用策略与速度对照
+
+在线消费者和完整会议评测共用 `MeetingEngine.run`：等待推理时继续有界接收输入，仅无状态抽取读取原文快照并行执行；字段核验、关系归并、事实编号及正式提交按原文顺序进行。窗口满时停止继续取输入。失败拆分导致来源边界改变时，后续预取取消并重新准备；取消、关闭和最终刷新会等待子任务清理，不能跳过未处理原文。兼容的 `append/cycle/finalize` 接口继续提供串行处理路径。
+
+三个优化开关暂时保留保守默认值。显式启用示例：
+
+```bash
+MEETNOTE_EXTRACTION_WINDOW=2 MEETNOTE_LOCAL_EXTRACTION_RETRY=true MEETNOTE_PARALLEL_CHAPTERS=true poetry run meetnote serve
+```
+
+局部纠正只保留已通过记录，对指定原文重新抽取，合并后再次完整校验；跨记录依赖不能安全定位时仍整批纠正。该策略不删除校验、不减少原文，也不改变抽取字段。
+
+在 BF16 决策服务就绪后运行同后端对照：
+
+```bash
+MEETNOTE_DECISION_BACKEND=laya poetry run meetnote compare-strategy --case business_release_10k --rounds 3
+```
+
+该命令交替运行串行基线与窗口 2、局部纠正、并行章节组合，各三次；两边都执行完整抽取与最终成文，不复用跨运行抽取结果，不包含模型加载时间。失败或有剩余原文的运行不能用于加速结论。人工标注仍只在推理结束后读取，会议输入、事件与结果只在内存及标准输出中，不写文件。
+
+`stats.by_task` 提供请求数、输入输出 token、错误次数、累计请求和排队耗时、最多 256 条首个输出增量延迟；另有抽取窗口峰值、局部纠正与拆分计数。并发时请求累计耗时可能超过墙钟时间，端到端速度只能使用完整运行的 `elapsed_seconds`。上游排队和前缀缓存仍会影响测量，应同时查看每轮数据和质量，不把单次最好成绩当稳定收益。正式切换默认配置要求完整对照的耗时中位数至少下降 20%，且关键覆盖、负责人期限及最终纪要质量不退步。
+
+## API 与内存生命周期
+
+会话路径保持 `/api/v1/sessions`，快照契约升级为 `contract_version=2`，需要同步升级客户端。
+
+| 操作 | 接口 |
 | --- | --- |
-| `POST /api/v1/sessions` | 创建会话，JSON 为 `{"title":"产品周会"}` |
-| `GET /api/v1/sessions` | 列出当前内存会话 |
-| `GET /api/v1/sessions/{id}` | 取得原文、正式摘要、规划、纪要及处理状态 |
-| `POST /api/v1/sessions/{id}/chunks` | 追加定稿文本，返回 202 和确认序号 |
-| `POST /api/v1/sessions/{id}/finalize` | 停止接受新输入，排空队列并生成纪要 |
-| `GET /api/v1/sessions/{id}/events` | SSE 事件流，支持 `Last-Event-ID` |
-| `DELETE /api/v1/sessions/{id}` | 取消任务并释放会话 |
-| `GET /api/v1/samples` | 列出合成转写版本 |
-| `GET /api/v1/samples/{id}` | 取得一份转写，不返回参考标注 |
-| `GET /api/v1/info` | 模型类型、节点列表及内存保留规则 |
-| `GET /health/live` | 进程存活检查，不表示上游模型可用 |
+| 创建／列表 | `POST /api/v1/sessions`、`GET /api/v1/sessions` |
+| 快照 | `GET /api/v1/sessions/{id}` |
+| 追加定稿片段 | `POST /api/v1/sessions/{id}/chunks` |
+| 收尾 | `POST /api/v1/sessions/{id}/finalize` |
+| SSE | `GET /api/v1/sessions/{id}/events` |
+| 取消并释放 | `DELETE /api/v1/sessions/{id}` |
+| 语料列表／详情 | `GET /api/v1/samples`、`GET /api/v1/samples/{id}` |
+| 阶段和模型配置／存活检查 | `GET /api/v1/info`、`GET /health/live` |
+
+创建请求支持 `{"title":"评审会","meeting_date":"2026-10-01"}`。日期未知时留空，不使用运行当天日期推断会议年份。
 
 追加请求示例：
 
 ```json
-{
-  "chunk_id": "segment-001",
-  "text": "时间改一下，周四完成验收，周五发布。",
-  "speaker": "陈宁",
-  "timestamp": "2026-09-01T10:03:00"
-}
+{"chunk_id":"u001","text":"陈宁周四完成验收。","speaker":"周宁","timestamp":"2026-10-01T10:03:00"}
 ```
 
-只有 `text` 必填，每次最多 16000 字。可选 `chunk_id` 用于幂等提交：相同 ID、相同内容返回原序号；内容、说话人或时间冲突返回 409。没有 ID 时由服务生成。片段顺序以服务成功接收顺序为准，`timestamp` 是参考信息。已确认的重复片段在收尾后仍能取得原确认，不视作新输入。
+只有 `text` 必填，每片段最多 16000 字。相同 ID、内容、说话人和时间的重复请求返回原确认；冲突返回 409。输入顺序以接收序号为准。每会话只有一个消费者修改引擎。
 
-生命周期为 `running → finalizing → completed`，另有 `failed`、`cancelled`。收尾与入队共用临界区，收尾后新输入返回 409；队列或会话达到容量时返回 429，累计文本超过上限返回 413。接受成功不等于摘要完成，需等待处理结果或终态事件。
+`running → finalizing → completed`，另有 `failed`、`cancelled`。收尾后拒绝新输入，已接收的幂等重试仍返回原确认。队列／会话满返回 429，累计文本超限返回 413。接收成功不等于处理成功，需观察进度及终态。失败保留已接受原文和已提交事实至保留期结束；删除、过期或服务重启后不可恢复。
 
-摘要边界无法定位时原文保持不变；最终刷新无进展时会话进入 `failed`，已接受原文与已有摘要仍可在保留期内查询。空会话可以完成，但没有纪要。模型超时、失败和输出截断不会被当作成功摘要。Marker、Lens、规划和成文有显式规则降级，事件或纪要说明中会标明。
+快照提供 `facts`、`revisions`、`sources`、`minutes`、`stats`、处理位置及事件游标。移除了旧 `summaries`、`lens`、`plan`、`plan_revision`、`debt` 字段。`processed_count` 表示消费者接收的片段数，实际证据处理状态见 `sources[].disposition` 和 `remaining_chars`。
 
-### SSE
+SSE 保留 `Last-Event-ID` 补发、游标过期快照恢复和终态关闭。新增／使用 `facts.updated`、`fields.corrected`、`model.request`、`model.reused`、`model.validation_failed`、`minutes.completed` 及节点／会话生命周期事件。修订事实具有稳定 ID 和递增 revision。
 
-SSE 使用默认 `message` 事件，JSON 中的 `type` 表达语义：
+`model.request` 提供 response ID、实际 usage、缓存 token、请求耗时和失败／截断详情。缺失 usage 用 null 表达并计入 `usage_unknown`。逻辑任务数、HTTP 请求数和结果缓存命中分别记录。日志仅记录操作元数据；调试输入输出保留在有界内存事件中，不自动写会议文件。
 
-```text
-id: 42
-data: {"id":42,"type":"summary.committed","data":{"id":"summary_0001","summary":"…","chunk_ids":["segment-001"],"start":0,"end":24}}
+适配器会提前终止连续空白或长片段重复三次的异常输出，保留最多 2000 字符的诊断尾部。异常响应不作为有效结果；抽取节点按失败重试规则拆分，不能从未完成响应中截取 JSON 伪装成功。
 
-```
+## 分层测试与验收
 
-主要类型：`session.snapshot`、`input.accepted`、`input.processed`、`node.started`、`node.completed`、`node.skipped`、`node.degraded`、`node.failed`、`scheduler.updated`、`model.started`、`model.completed`、`summary.committed`、`summary.rejected`、`plan.updated`、`minutes.completed`、`session.terminal`、`session.cancelled`。
-
-第一次连接、游标过期或无效的未来游标会收到完整快照；历史事件在缓存范围内时从游标之后补发。终态连接返回最终快照后关闭。每 15 秒发送心跳。单条调试事件超过字节上限时只保留截断标记，业务结果仍通过会话快照查询。没有为每个订阅者建立无界队列。
-
-服务只向标准输出记录操作元数据和错误类型，不自动保存原文、Prompt、模型响应或纪要；调试详情留在有界内存事件中。CLI `replay` 明确将结果输出到标准输出。浏览器不使用本地存储保存会话。
-
-## 十三节点与代码组织
-
-| 节点 | 职责 |
-| --- | --- |
-| `bucket_accumulator` | 追加原文及稳定位置 |
-| `cycle_slice_builder` | 按字数及时间形成处理窗口 |
-| `fallback_guard` | 标明窗口是否可处理 |
-| `llm_signal_marker` | 提取主题、ASR 风险、缺失信息和提交信号 |
-| `commit_debt_meter` | 累计信号压力，阈值为 3 |
-| `work_candidate_builder` | 根据压力与已提交摘要选择候选任务 |
-| `model_work_scheduler` | 摘要优先，空闲轮次处理 Lens 和结构提示 |
-| `meeting_lens_builder` | 判断会议组织方向及不稳定部分 |
-| `template_planner` | 提供轻量章节与证据提示 |
-| `summary_worker` | 生成候选摘要与原文边界 |
-| `bucket_enricher` | 核对边界、去重并正式提交摘要与证据 |
-| `main_minutes_planner` | 结合当前证据与上一轮计划更新纪要规划 |
-| `minutes_composer` | 收尾时根据完整已提交证据生成纪要 |
-
-所有入口都调用同一 `MeetingEngine`，通过原生 `async/await` 顺序执行上述 13 个节点。统一执行器负责状态合并、事件和计时；每步成功立即保存，后续失败或取消时保留已完成的更新。会话消费者是引擎状态的唯一写入者，输入接收队列与模型调用分离。Stream、Cycle、Schedule、Knowledge 是四组职责明确的状态，节点返回类型明确的 `StatePatch`：省略字段表示保留，显式 `None` 表示清空，空更新表示跳过。事件日志位于引擎状态之外。
-
-`domain` 定义契约；`engine` 承载业务节点及纯规则；`llm` 只处理 Responses 传输与结构校验；`sessions` 管理内存生命周期；`web` 适配 HTTP/SSE；`commands`、`corpus` 负责命令和只读语料。各模型任务的指令放在独立 Prompt 资源中，Schema 由 Pydantic 字段定义生成。
-
-保留原型的债务、Lens 与规划反馈机制，同时修复旧实现中跨入口执行逻辑重复、收尾后仍接受文本、证据包含窗口之外片段、关键词相同导致不同事实被去重等问题。当前首版保守要求原文边界唯一，无法确认时不消费文本。
-
-## 合成语料与回放
-
-语料由子智能体编写，位于 `/workspace/model-bin/meetnote`，不提交到代码仓库。共 8 场会议、24 份转写：`clean`、`colloquial`、`asr_noisy`。口语版包含改口、重复、插话、半句和话题返回；噪声版覆盖同音、人名、术语、数字、漏词、否定词、重复、断句、单位及说话人误归属错误。人物与组织均为虚构。
-
-`transcripts.jsonl` 每行是一份会议转写，包含元数据和有序 `segments`；`annotations.jsonl` 独立保存参考事实、决定、行动项、未决问题、证据及错误跨度，应用输入不读取它。`manifest.json` 提供数量、长度和 SHA-256，数据目录内另有中文说明。
-
-```bash
-poetry run meetnote validate-corpus
-poetry run meetnote replay product_clean --mock
-poetry run meetnote replay product_asr_noisy
-```
-
-页面按定稿片段逐段提交，1× 约为 12 字/秒，也可暂停、继续、加速或立即提交。回放结束会自动收尾。评估时按证据和关键事实对照参考标注，不要求摘要措辞一致；不可从噪声恢复的信息不能按理想版本强行补全。
-
-## 检查
+日常开发先运行不联网测试：
 
 ```bash
 poetry run ruff check src/meetnote tests
 poetry run pytest -q
 pnpm --dir src/web run lint
 pnpm --dir src/web run build
-pnpm --dir src/web exec playwright install chromium
 pnpm --dir src/web exec playwright test
 poetry build
 ```
 
-后端测试不依赖模型服务或外部语料。浏览器检查需要合成语料，会自动启动 8011 端口的 mock 服务，覆盖样本回放、手工输入、暂停继续、收尾、释放、双主题及窄屏。截图作为临时检查产物存放在 `/tmp`。
+行为测试使用脚本模型、假 Responses 传输和可注入时钟，覆盖推进、修订、引用、故障、取消、幂等、背压、收尾和请求预算；不需要真实模型或长会议。浏览器测试使用 mock 服务，检查回放、手工输入、暂停继续、收尾、释放及双主题窄屏。
 
-真实模型检查与常规测试分开进行。模型耗时、表达质量和上游容量会影响实时体验；一次结构化接口连通不代表整条业务链路通过，需同时核对原文消费、摘要、纪要和降级说明。
+显式短测调用实际模型，每次只重跑受影响案例：
 
-### 本次本地验收（2026-10-01）
+```bash
+poetry run meetnote check-short --case amount --case question
+poetry run meetnote check-short
+poetry run meetnote check-fragment --case business_budget_20k --segments 12
+poetry run meetnote check-fragment --case business_budget_20k --start-segment 109 --segments 12
+```
 
-- 全部 24 份样本通过 mock 引擎完整回放，原文全部消费并生成模拟纪要。
-- `spark25` 完整回放 `product_clean`：9 条摘要，纪要 2198 字符，约 257 秒，无降级，剩余原文为 0。
-- `spark25` 完整回放 `product_asr_noisy`：19 条摘要，纪要 2089 字符，约 245 秒，无降级，剩余原文为 0。
-- 两次真实运行验证了端到端接线和最终交付，不代表对所有摘要事实的准确率评测；首版未设准确率或实时延迟 SLA。
+`check-fragment` 只运行最多 20 条发言，可从故障附近开始，单独标记为局部检查，不计作整场验收。
+
+36 个案例覆盖金额、单位、负责人、提议、期限、否定、条件、不确定性、冲突、空白尾部、后续决定、取消方案、直接分工、主备值班、收费规则、延期问题、混合语气、发言人与负责人区分、采购范围重申、明确与无依据的期限、第一人称行动、显式引用旧安排的修订、撤回草案、补充说明不覆盖旧事实、混合分工与双日期、核实计划不关闭风险、日志对象区分、分工代词还原、天气条件重申、候选场地取消、未决状态重申、有审批条件的第一人称执行分工、待确认日期转正式日期和例行散会正文过滤。自动检查只是必要条件，仍需审阅事实和纪要语义。
+
+只有短测通过且功能稳定后才运行正式长会：
+
+```bash
+poetry run meetnote evaluate-formal --case business_budget_20k --case ops05
+poetry run meetnote replay business_release_10k --directory data-bin/data
+```
+
+`data-bin/data` 支持 manifest 指向的 15 篇正式语料，读取时校验 hash 和片段数。应用只读原文与日期，不读 gold；评估器在模型运行结束后才读取 gold 并输出逐项对照。旧 `transcripts.jsonl` 语料格式继续支持。
+
+所有评估结果仅输出标准输出，不生成会议记录文件。长会结果分别报告原文处理覆盖、事项覆盖、事实准确性、降级、调用、token 和耗时；“完成”不等于 428 条事实验收全部通过。验收要求所有关键检查通过且无虚构负责人／期限、错误修订或静默丢失，不以降低门槛替代修复。
+
+## BF16 双模型联调
+
+主模型负责抽取和章节整理，qwen-decider BF16 负责字段、关系及证据核验。独立实例使用 `MEETNOTE_DECISION_BACKEND=laya`、`MEETNOTE_LAYA_URL=http://127.0.0.1:10003`、`MEETNOTE_LAYA_FALLBACK=false`。启动检查和验收命令见 [联调说明](docs/INTEGRATION.md)。本阶段只验证真实流程跑通，不执行对照实验。
+
+## 效果与精度对照
+
+`evaluate-decisions --backend both` 检查独立决策，`compare-decisions` 检查复用抽取结果后的短流程，`review-quality --sample product_clean --details` 在内存中复跑完整会议并输出人工复核材料。结果及局限见 [BF16 质量对照报告](docs/QUALITY_COMPARISON.md)。不要将复用抽取的运行耗时当作系统加速比。
+
+### 面向阅读的纪要
+
+会中由 MeetingEngine 从已提交证据快照调用主模型组织正文，输出会议概述、主要结论、讨论要点、后续安排和实质未决问题，并以原文为依据进行一次独立审校。跨章节高度重复的段落会触发校验重试。正文不展示事实编号、状态标签和证据附录；结构化 `minutes.narrative` 保留段落与事实引用，`checklist`、`evidence_trace` 继续保留完整依据。引用校验或正文生成失败会使本次生成失败，不以事实清单冒充纪要。正文与证据仍仅存在会话内存中。
+
+### 会中流式纪要
+
+`MeetingEngine.run()` 在提交证据后调度正文任务，每会话最多一个，状态提交仍由唯一消费者执行。首批有效内容立即整理，后续默认至少间隔 10 秒启动一次；通过 `MEETNOTE_MINUTES_INTERVAL` 调整。正文任务只读取已提交证据，生成与审校沿用结构化引用约束、有界重试及模型并发额度，不阻塞输入接口。
+
+SSE 新增 `minutes.started`、`minutes.delta`、`minutes.updated` 和 `minutes.aborted`。预览事件携带 `round`、`sequence`、`covered_chars` 和 `blocks`，只包含已解码的正文文本；正式提交事件携带完整 `minutes`。快照增加 `minutes_preview`，用于补发游标过期或断线恢复；该字段及所有会议数据仅存内存。`info.capabilities` 声明 `rolling_minutes` 和 `minutes_preview`，契约版本仍为 2。
+
+未完成的 JSON 转义、字段名和引用不进入预览正文。生成中的正文属于可撤回预览，只有完整校验和审校成功后才提交稳定纪要；失败撤回预览。结束时先处理全部尾部证据，正文覆盖最终消费位置时直接复用，否则完成最后一次更新后发布 `minutes.completed`。空会议不补造纪要。

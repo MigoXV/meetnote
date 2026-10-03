@@ -43,7 +43,7 @@ def test_late_sse_subscriber_gets_final_snapshot_and_resume():
         resumed = client.get(
             f"/api/v1/sessions/{session_id}/events", headers={"Last-Event-ID": "0"}
         )
-        assert '"type": "summary.committed"' in resumed.text
+        assert '"type": "facts.updated"' in resumed.text
         assert (
             client.get(
                 f"/api/v1/sessions/{session_id}/events", headers={"Last-Event-ID": "oops"}

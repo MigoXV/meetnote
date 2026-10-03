@@ -108,11 +108,11 @@ export function useReplay(reportError: (message: string) => void) {
 
   async function start(
     sampleId: string,
-    create: (title: string) => Promise<string>,
+    create: (title: string, meetingDate?: string) => Promise<string>,
   ) {
     reset();
     const transcript = await api<Transcript>("/samples/" + sampleId);
-    const session = await create(transcript.title);
+    const session = await create(transcript.title, transcript.meeting_date);
     currentReplay.current = { session, transcript, index: 0 };
     setProgress({ current: 0, total: transcript.segments.length });
     void resume();

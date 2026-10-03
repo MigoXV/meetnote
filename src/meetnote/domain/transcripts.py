@@ -36,7 +36,7 @@ class Segment(BaseModel):
 class Transcript(BaseModel):
     id: str
     meeting_id: str
-    variant: Literal["clean", "colloquial", "asr_noisy"]
+    variant: Literal["clean", "colloquial", "asr_noisy", "formal"]
     title: str
     meeting_date: str
     segments: list[Segment] = Field(min_length=1)

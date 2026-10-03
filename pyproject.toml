@@ -1,13 +1,13 @@
 [project]
 name = "meetnote"
 version = "0.1.0"
-description = "无持久化的会议摘要 sidecar 与十三节点调试工作台"
+description = "基于有界证据流水线的内存会议纪要 sidecar"
 authors = [{name = "migo", email = "1695587905@qq.com"}]
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "typer>=0.15,<1", "fastapi[standard]>=0.138,<1", "pydantic-settings>=2,<3",
-  "openai>=2,<3", "httpx>=0.28,<1",
+  "openai>=2,<3", "httpx>=0.28,<1", "tokenizers (>=0.21,<1)",
 ]
 
 [tool.poetry]

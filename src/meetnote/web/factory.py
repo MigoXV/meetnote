@@ -8,9 +8,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from meetnote.config import Settings
 from meetnote.corpus.reader import read_transcripts
 from meetnote.domain.transcripts import ChunkInput, Transcript
-from meetnote.engine.runtime import NODES
-from meetnote.llm.client import ModelClient, ResponsesClient
-from meetnote.llm.mock import MockClient
+from meetnote.engine.models import create_model
+from meetnote.engine.runtime import STAGES
+from meetnote.llm.client import ModelClient
 from meetnote.sessions.events import Event
 from meetnote.sessions.manager import TERMINAL, SessionError, SessionManager
 from meetnote.web.schemas import (
@@ -36,9 +36,20 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        client = model or (
-            MockClient() if settings.provider == "mock" else ResponsesClient(settings)
-        )
+        client = model or (create_model(settings))
+        decision_info = None
+        if settings.decision_backend == "laya" and model is None:
+            try:
+                decision_info = await client.client.info()
+                if (
+                    decision_info.get("backend") != "vllm"
+                    or decision_info.get("precision") != "bf16"
+                ):
+                    raise RuntimeError("双模型联调要求 BF16 vLLM 决策服务")
+            except BaseException:
+                await client.close()
+                raise
+        app.state.decision_info = decision_info
         manager = SessionManager(settings, client)
         app.state.manager = manager
         manager.start()
@@ -64,10 +75,15 @@ def create_app(
     async def info():
         return {
             "name": "MeetNote",
+            "contract_version": 2,
+            "capabilities": ["rolling_minutes", "minutes_preview"],
             "provider": settings.provider,
             "model": settings.model,
-            "nodes": [n.__name__ for n in NODES],
+            "nodes": list(STAGES),
             "persistence": False,
+            "decision_backend": settings.decision_backend,
+            "decision_fallback": settings.laya_fallback,
+            "decision_model": app.state.decision_info,
             "retention_seconds": settings.retention_seconds,
         }
 
@@ -80,7 +96,7 @@ def create_app(
 
     @app.post("/api/v1/sessions", status_code=201, response_model=SessionSnapshot)
     async def create_session(body: CreateSession):
-        return manager().create(body.title).snapshot()
+        return manager().create(body.title, body.meeting_date).snapshot()
 
     @app.get("/api/v1/sessions/{session_id}", response_model=SessionSnapshot)
     async def get_session(session_id: str):

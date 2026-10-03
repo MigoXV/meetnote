@@ -42,8 +42,11 @@ export function useWorkspace(reportError: (message: string) => void) {
     setConnection(id ? "正在连接" : "等待连接");
   }, []);
 
-  const create = async (title = "临时会议") => {
-    const state = await api<Snapshot>("/sessions", "POST", { title });
+  const create = async (title = "临时会议", meeting_date = "") => {
+    const state = await api<Snapshot>("/sessions", "POST", {
+      title,
+      meeting_date,
+    });
     select(state.id);
     setSnapshot(state);
     await refreshSessions();
@@ -101,7 +104,7 @@ export function useWorkspace(reportError: (message: string) => void) {
       if (
         [
           "input.processed",
-          "summary.committed",
+          "facts.updated",
           "minutes.completed",
           "session.terminal",
           "session.cancelled",
