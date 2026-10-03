@@ -15,6 +15,7 @@ from pydantic import BaseModel, ValidationError
 from meetnote.config import Settings
 
 request_observer = ContextVar("request_observer", default=None)
+output_observer = ContextVar("output_observer", default=None)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -108,6 +109,8 @@ class ResponsesClient:
         estimated = self.budget.check(instructions, json.loads(payload), schema)
         started = perf_counter()
         metadata = {
+            "started_at": started,
+            "first_output_ms": None,
             "task": task,
             "usage": None,
             "response_id": None,
@@ -127,6 +130,9 @@ class ResponsesClient:
                 observer(metadata)
 
     async def _read_stream(self, instructions, payload, schema, task, metadata):
+        observer = output_observer.get()
+        if observer:
+            observer(None)  # 每次网络/结构重试开始新的预览，不能拼接不同响应。
         stream = await self.client.responses.create(
             model=self.settings.model,
             instructions=instructions,
@@ -162,7 +168,13 @@ class ResponsesClient:
                     details = getattr(response, "incomplete_details", None)
                     metadata["incomplete_details"] = details.model_dump() if details else None
                 if event.type == "response.output_text.delta":
+                    if event.delta and metadata["first_output_ms"] is None:
+                        metadata["first_output_ms"] = round(
+                            (perf_counter() - metadata["started_at"]) * 1000
+                        )
                     chunks.append(event.delta)
+                    if observer:
+                        observer(event.delta)
                     output_chars += len(event.delta)
                     trailing_whitespace = (
                         trailing_whitespace + len(event.delta)

@@ -4,8 +4,8 @@ import json
 
 from meetnote.domain.transcripts import TranscriptChunk
 from meetnote.engine.context import Context
+from meetnote.engine.models import create_model
 from meetnote.engine.runtime import MeetingEngine
-from meetnote.llm.client import ResponsesClient
 
 # alternatives 表示同一检查允许的表达；不能用模型自己给自己评分。
 CASES = {
@@ -310,8 +310,8 @@ def verify(case, engine):
     return errors
 
 
-async def run_short(settings, names, emit=print):
-    model = ResponsesClient(settings)
+async def run_short(settings, names, emit=print, model=None):
+    model = model or create_model(settings)
     failures = 0
     try:
         for name in names:

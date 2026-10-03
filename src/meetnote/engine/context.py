@@ -10,7 +10,13 @@ from time import perf_counter
 
 from meetnote.config import Settings
 from meetnote.llm.budget import Budget
-from meetnote.llm.client import ModelClient, ModelFailure, request_observer, strict_schema
+from meetnote.llm.client import (
+    ModelClient,
+    ModelFailure,
+    output_observer,
+    request_observer,
+    strict_schema,
+)
 
 
 @dataclass
@@ -45,6 +51,15 @@ class Context:
         )
 
     def observe(self, data):
+        if data.get("fallback"):
+            self.stats["decision_fallbacks"] = self.stats.get("decision_fallbacks", 0) + 1
+            self.emit("model.fallback", data)
+            return
+        backend = data.get("backend", "responses")
+        self.stats[backend + "_requests"] = self.stats.get(backend + "_requests", 0) + 1
+        self.stats[backend + "_elapsed_ms"] = self.stats.get(backend + "_elapsed_ms", 0) + data.get(
+            "elapsed_ms", 0
+        )
         self.stats["requests"] += 1
         key = data["task"] + "_requests"
         self.stats[key] = self.stats.get(key, 0) + 1
@@ -57,13 +72,48 @@ class Context:
             self.stats["cached_tokens"] += (usage.get("input_tokens_details") or {}).get(
                 "cached_tokens"
             ) or 0
+        tasks = self.stats.setdefault("by_task", {})
+        task = tasks.setdefault(
+            data["task"],
+            {
+                "requests": 0,
+                "elapsed_ms": 0,
+                "queue_ms": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "errors": 0,
+                "first_output_ms": [],
+            },
+        )
+        task["requests"] += 1
+        task["elapsed_ms"] += data.get("elapsed_ms", 0)
+        task["queue_ms"] += data.get("queue_ms", 0)
+        task["errors"] += bool(data.get("error"))
+        for key in ("input_tokens", "output_tokens"):
+            task[key] += (usage or {}).get(key) or 0
+        if data.get("first_output_ms") is not None:
+            # 有界采样；累计计数不截断。
+            task["first_output_ms"] = (task["first_output_ms"] + [data["first_output_ms"]])[-256:]
         self.emit("model.request", data)
 
-    async def invoke(self, task, context, schema, validate=None):
+    async def invoke(
+        self,
+        task,
+        context,
+        schema,
+        validate=None,
+        repair=None,
+        retry_validation=True,
+        on_output=None,
+    ):
         prompt = self.prompt(task)
         count = self.budget.check(prompt, context, schema)
         self.stats["tasks"] += 1
+        identity = (
+            await self.model.cache_identity(task) if hasattr(self.model, "cache_identity") else None
+        )
         key_data = [
+            identity,
             task,
             self.settings.base_url,
             self.settings.model,
@@ -98,6 +148,7 @@ class Context:
             },
         )
         token = request_observer.set(self.observe)
+        output_token = output_observer.set(on_output)
         try:
             result = await self.model.generate(task, prompt, context, schema)
             if validate:
@@ -108,6 +159,8 @@ class Context:
                         "model.validation_failed",
                         {"task": task, "error": str(exc), "output": result.model_dump()},
                     )
+                    if not retry_validation:
+                        raise ModelFailure("task_validation_failed:" + str(exc)) from exc
                     correction = {
                         **context,
                         "validation_error": str(exc),
@@ -116,8 +169,12 @@ class Context:
                     with_output = {**correction, "invalid_output": result.model_dump(mode="json")}
                     if self.fits(task, with_output, schema):
                         correction = with_output
-                    self.budget.check(prompt, correction, schema)
-                    result = await self.model.generate(task, prompt, correction, schema)
+                    self.stats["validation_retries"] = self.stats.get("validation_retries", 0) + 1
+                    if repair is not None and getattr(exc, "source_ids", ()):
+                        result = await repair(result, exc)
+                    else:
+                        self.budget.check(prompt, correction, schema)
+                        result = await self.model.generate(task, prompt, correction, schema)
                     try:
                         validate(result)
                     except ModelFailure as final_error:
@@ -136,6 +193,7 @@ class Context:
             raise
         finally:
             request_observer.reset(token)
+            output_observer.reset(output_token)
         raw = result.model_dump_json()
         size = len(raw.encode())
         if self.settings.cache_entries and size <= self.settings.cache_bytes:

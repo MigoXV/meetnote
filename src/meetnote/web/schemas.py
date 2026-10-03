@@ -35,6 +35,7 @@ class SessionSnapshot(SessionRow):
     revisions: list[Revision]
     sources: list[dict]
     minutes: MinuteDraft | None
+    minutes_preview: dict | None = None
     warnings: list[str]
     stats: dict
     event_cursor: int

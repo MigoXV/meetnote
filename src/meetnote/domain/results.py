@@ -1,5 +1,6 @@
 """证据、事实修订与交付契约；字段说明同时进入模型 Schema。"""
 
+from copy import deepcopy
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
@@ -198,8 +199,53 @@ def chapter_selection_schema(limit):
     )
 
 
+class OverviewParagraph(SectionItem):
+    text: str = Field(
+        min_length=1, max_length=100, description="只交代主题和总体发现，不重复列举结论"
+    )
+
+
+class ReaderMinutes(Result):
+    overview: OverviewParagraph = Field(description="会议主题与核心结果，一段连贯概述")
+    conclusions: list[SectionItem] = Field(
+        max_length=3, description="主要发现、结论或决议；无则空数组"
+    )
+    discussion: list[SectionItem] = Field(description="按主题归纳的讨论要点，避免与结论重复")
+    actions: list[SectionItem] = Field(description="实际分工及提出的后续安排，明确区分建议与承诺")
+    open_questions: list[SectionItem] = Field(
+        max_length=2, description="尚需解决的实质问题；无则空数组"
+    )
+
+
+def reader_minutes_schema(fact_ids):
+    """把已有引用边界前移到结构化解码；输出字段与公开纪要类型保持一致。"""
+    ids = tuple(dict.fromkeys(fact_ids))
+    if not ids:
+        raise ValueError("reader minutes require allowed facts")
+    reference = Literal[ids]
+    paragraph = create_model(
+        "GroundedParagraph",
+        __base__=SectionItem,
+        fact_ids=(list[reference], deepcopy(SectionItem.model_fields["fact_ids"])),
+    )
+    overview = create_model(
+        "GroundedOverview",
+        __base__=OverviewParagraph,
+        fact_ids=(list[reference], deepcopy(SectionItem.model_fields["fact_ids"])),
+    )
+    return create_model(
+        "GroundedReaderMinutes",
+        __base__=ReaderMinutes,
+        **{
+            name: (overview if name == "overview" else list[paragraph], deepcopy(field))
+            for name, field in ReaderMinutes.model_fields.items()
+        },
+    )
+
+
 class MinuteDraft(Result):
     title: str
+    narrative: ReaderMinutes | None = None
     markdown: str
     sections: list[Chapter]
     checklist: list[Fact]

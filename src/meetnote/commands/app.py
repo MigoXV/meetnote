@@ -10,8 +10,7 @@ import uvicorn
 from meetnote.config import Settings
 from meetnote.corpus.reader import read_transcripts, validate_corpus
 from meetnote.domain.transcripts import ChunkInput
-from meetnote.llm.client import ResponsesClient
-from meetnote.llm.mock import MockClient
+from meetnote.engine.models import create_model
 from meetnote.sessions.manager import SessionError, SessionManager
 
 app = typer.Typer(no_args_is_help=True, help="MeetNote：会议摘要 sidecar")
@@ -62,7 +61,7 @@ def replay(
         settings.provider = "mock"
 
     async def run():
-        model = MockClient() if settings.provider == "mock" else ResponsesClient(settings)
+        model = create_model(settings)
         manager = SessionManager(settings, model)
         try:
             session = manager.create(sample.title, sample.meeting_date)
@@ -105,6 +104,23 @@ def check_short(
         raise typer.Exit(1)
 
 
+@app.command("compare-strategy")
+def compare_strategy_command(
+    case: Annotated[str, typer.Option()] = "business_release_10k",
+    directory: Annotated[Path, typer.Option()] = Path("data-bin/data"),
+    rounds: Annotated[int, typer.Option(min=1, max=10)] = 3,
+):
+    """同一 BF16 双模型后端，交替运行串行基线与优化策略，不复用抽取结果。"""
+    from meetnote.evaluation.strategy import compare_strategy
+
+    samples = {s.id for s in read_transcripts(directory)}
+    if case not in samples:
+        raise typer.BadParameter("正式语料 ID 不存在")
+    result = asyncio.run(compare_strategy(Settings(), directory, case, typer.echo, rounds))
+    if not result["complete"]:
+        raise typer.Exit(1)
+
+
 @app.command("evaluate-formal")
 def evaluate_formal(
     case: Annotated[list[str], typer.Option(help="正式语料 ID，可重复指定")],
@@ -135,6 +151,59 @@ def check_fragment(
         raise typer.BadParameter("样本或起始发言不存在")
     if asyncio.run(run_formal(Settings(), directory, [case], typer.echo, segments, start_segment)):
         raise typer.Exit(1)
+
+
+@app.command("evaluate-decisions")
+def evaluate_decisions(
+    backend: str = typer.Option("both", help="responses、laya 或 both"),
+    simulate: bool = typer.Option(False, help="只运行明确标记的标准答案与错误注入模拟"),
+):
+    """短决策对照；标注与真实模型输入分离，结果只输出 stdout。"""
+    from meetnote.evaluation.decisions import run_decisions, run_simulated_decisions
+
+    if simulate:
+        from meetnote.evaluation.sensitivity import run_sensitivity
+
+        run_simulated_decisions(typer.echo)
+        asyncio.run(run_sensitivity(typer.echo))
+    else:
+        if backend not in {"responses", "laya", "both"}:
+            raise typer.BadParameter("backend 必须为 responses、laya 或 both")
+        asyncio.run(
+            run_decisions(
+                Settings(), typer.echo, ("responses", "laya") if backend == "both" else (backend,)
+            )
+        )
+
+
+@app.command("compare-decisions")
+def compare_decisions():
+    """36 个现有短流程，内存复用相同抽取请求，对照真实决策后端。"""
+    from meetnote.evaluation.paired import run_paired
+
+    asyncio.run(run_paired(Settings(), typer.echo))
+
+
+@app.command("check-integration")
+def check_integration(
+    url: str = typer.Option("http://127.0.0.1:8012", help="真实双模型 MeetNote 实例"),
+):
+    """短流程通过后回放完整会议；仅终端报告，不写会议文件。"""
+    from meetnote.evaluation.integration import run_integration
+
+    if asyncio.run(run_integration(Settings(), url, typer.echo)):
+        raise typer.Exit(1)
+
+
+@app.command("review-quality")
+def review_quality(
+    sample: str = typer.Option("product_clean", help="完整会议转写 ID"),
+    details: bool = typer.Option(False, help="在终端显示实际纪要及事实；不落盘"),
+):
+    """对照两种决策后端的完整会议产出，标注只用于事后复核。"""
+    from meetnote.evaluation.quality import run_quality
+
+    asyncio.run(run_quality(Settings(), sample, details, typer.echo))
 
 
 if __name__ == "__main__":

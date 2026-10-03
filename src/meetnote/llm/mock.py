@@ -20,6 +20,32 @@ class MockClient:
             }
         elif task == "reconcile":
             data = {"relations": []}
+        elif task == "minutes_review":
+            data = context["draft"]
+        elif task == "minutes":
+            sources = {s["id"]: s for s in context["sources"]}
+            items = [
+                {
+                    "text": "；".join(
+                        (sources[sid].get("speaker") or "") + sources[sid]["text"]
+                        for sid in f["source_ids"]
+                        if sid in sources
+                    )
+                    or "模拟纪要",
+                    "fact_ids": [f["id"]],
+                }
+                for f in context["facts"]
+            ]
+            data = {
+                "overview": {
+                    "text": "；".join(i["text"] for i in items)[:100],
+                    "fact_ids": [f["id"] for f in context["facts"]],
+                },
+                "conclusions": [],
+                "discussion": [],
+                "actions": [],
+                "open_questions": [],
+            }
         elif task == "chapter":
             data = {
                 "fact_ids": list(

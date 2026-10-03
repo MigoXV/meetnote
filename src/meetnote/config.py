@@ -14,10 +14,17 @@ class Settings(BaseSettings):
     base_url: str = "http://192.168.0.222:10001/v1"
     model: str = "spark25"
     api_key: str = Field(default="local", repr=False)
+    decision_backend: Literal["responses", "laya"] = "responses"
+    laya_url: str = "http://127.0.0.1:10003"
+    laya_timeout: float = Field(default=30, gt=0)
+    laya_fallback: bool = False
     thinking: bool = False
     temperature: float = Field(default=0, ge=0, le=2)
     model_timeout: float = Field(default=240, gt=0)
     max_output_tokens: int = Field(default=4096, ge=64, le=32768)
+    extraction_window: int = Field(default=1, ge=1, le=4)
+    local_extraction_retry: bool = False
+    parallel_chapters: bool = False
     model_concurrency: int = Field(default=2, ge=1)
     tokenizer_path: Path = Path("/workspace/model-bin/XHToken/Spark-X2.5-4B-INT8/tokenizer.json")
     body_max_items: int = Field(default=18, ge=6, le=60)
@@ -30,6 +37,7 @@ class Settings(BaseSettings):
     cache_entries: int = Field(default=128, ge=0)
     cache_bytes: int = Field(default=8 * 1024 * 1024, ge=0)
     checkpoint_seconds: float = Field(default=9, ge=0)
+    minutes_interval: float = Field(default=10, ge=0)
     max_sessions: int = Field(default=32, ge=1)
     queue_size: int = Field(default=256, ge=1)
     max_session_chars: int = Field(default=200_000, ge=1)

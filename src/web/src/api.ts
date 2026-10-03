@@ -64,7 +64,23 @@ export interface Snapshot extends SessionRow {
   facts: Fact[];
   sources: Source[];
   revisions: Revision[];
-  stats: Record<string, number>;
+  stats: {
+    requests?: number;
+    tasks?: number;
+    by_task?: Record<
+      string,
+      {
+        requests: number;
+        elapsed_ms: number;
+        queue_ms: number;
+        input_tokens: number;
+        output_tokens: number;
+        errors: number;
+        first_output_ms: number[];
+      }
+    >;
+    [key: string]: unknown;
+  };
   meeting_date: string;
   minutes: Minutes | null;
   warnings: string[];

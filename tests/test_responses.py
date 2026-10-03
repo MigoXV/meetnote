@@ -206,3 +206,33 @@ async def test_usage_and_incomplete_reason_are_observable():
     assert ctx.stats["usage_unknown"] == 0
     assert next(d for k, d in events if k == "model.request")["response_id"] == "resp_1"
     await client.close()
+
+
+async def test_request_metrics_record_first_output_and_task_totals():
+    from meetnote.engine.context import Context
+
+    sdk = openai.AsyncOpenAI(
+        api_key="local",
+        base_url="http://test/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200, headers={"content-type": "text/event-stream"}, text=sse('{"ok":true}')
+                )
+            )
+        ),
+    )
+    client = ResponsesClient(Settings(_env_file=None), sdk)
+    records = []
+    context = Context(
+        Settings(_env_file=None), client, lambda kind, data: records.append((kind, data))
+    )
+    context.prompt = lambda _: "Return JSON."
+    await context.invoke("probe", {}, Answer)
+    metrics = context.stats["by_task"]["probe"]
+    assert metrics["requests"] == 1
+    assert metrics["errors"] == 0
+    assert len(metrics["first_output_ms"]) == 1
+    assert 0 <= metrics["first_output_ms"][0] <= metrics["elapsed_ms"]
+    await client.close()

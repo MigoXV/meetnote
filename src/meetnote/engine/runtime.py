@@ -3,23 +3,28 @@
 import asyncio
 import re
 from collections import defaultdict
+from copy import copy
 from dataclasses import replace
+from difflib import SequenceMatcher
 from time import monotonic, perf_counter
 
 from meetnote.domain.results import (
     Chapter,
     Fact,
     MinuteDraft,
+    ReaderMinutes,
     Relation,
     Revision,
     SectionItem,
     chapter_selection_schema,
     extraction_schema,
     field_support_schema,
+    reader_minutes_schema,
     relation_schema,
     unpack_extraction,
 )
 from meetnote.domain.state import KnowledgeState, Source, StreamState
+from meetnote.engine.minutes import RollingMinutes
 from meetnote.llm.client import ModelFailure
 
 STAGES = ("ingest", "extract", "fields", "reconcile", "commit", "chapter", "render")
@@ -42,6 +47,12 @@ STATUS_LABELS = {
     "retracted": "已撤销",
     "resolved": "已解决",
 }
+
+
+class ExtractionFailure(ModelFailure):
+    def __init__(self, message, source_ids):
+        super().__init__(message)
+        self.source_ids = tuple(source_ids)
 
 
 class NoProgress(RuntimeError):
@@ -231,6 +242,7 @@ class MeetingEngine:
         self.fact_index = defaultdict(set)
         self.finalized = False
         self.next_fact_id = 1
+        self.minutes = RollingMinutes(self)
 
     @property
     def stream(self):
@@ -289,7 +301,7 @@ class MeetingEngine:
             )
             offset += len(text)
 
-    async def append(self, chunk):
+    def ingest(self, chunk):
         if self.finalized:
             raise ModelFailure("engine_finalized")
         if chunk.seq != self.stream.processed + 1:
@@ -304,7 +316,113 @@ class MeetingEngine:
         self.stream.cursor = chunk.end
         self.stream.processed += 1
         self.context.emit("node.completed", {"node": "ingest", "seq": chunk.seq})
+
+    async def append(self, chunk):
+        self.ingest(chunk)
         await self.cycle()
+        await self.minutes.tick()
+
+    def prepare_extraction(self, batch):
+        # 推理任务只读快照；事实 ID、消费位置及正式状态由 run 的唯一消费者更新。
+        snapshot = copy(self)
+        snapshot.source_index = dict(self.source_index)
+        snapshot.state = dict(self.state)
+        snapshot.state["stream"] = replace(self.stream, sources=list(self.stream.sources))
+        return snapshot.extract(batch)
+
+    async def run(self, chunks):
+        """有界输入预取、无状态抽取并行、有状态核验与提交串行。"""
+        iterator = aiter(chunks)
+        incoming = None
+        jobs = []
+        ended = False
+        settings = self.context.settings
+
+        async def discard():
+            for _, task in jobs:
+                task.cancel()
+            await asyncio.gather(*(task for _, task in jobs), return_exceptions=True)
+            jobs.clear()
+
+        try:
+            while not ended or jobs or self.stream.pending:
+                await self.minutes.tick()
+                reserved = {s.id for batch, _ in jobs for s in batch}
+                pending = [s for s in self.stream.pending if s.id not in reserved]
+                while pending and len(jobs) < settings.extraction_window:
+                    total = sum(self.context.budget.count(s.text) for s in pending)
+                    if (
+                        not ended
+                        and total < settings.batch_tokens
+                        and self.clock() - self.stream.last_check < settings.checkpoint_seconds
+                    ):
+                        break
+                    batch, size = [], 0
+                    for source in pending:
+                        cost = self.context.budget.count(source.text)
+                        if batch and (
+                            size + cost > settings.batch_tokens
+                            or len(batch) >= settings.batch_sources
+                        ):
+                            break
+                        batch.append(source)
+                        size += cost
+                    if any(s.text.strip() for s in batch):
+                        task = asyncio.create_task(self.prepare_extraction(batch))
+                    else:
+                        task = asyncio.create_task(asyncio.sleep(0))
+                    jobs.append((batch, task))
+                    peak = self.context.stats.get("extraction_inflight_peak", 0)
+                    self.context.stats["extraction_inflight_peak"] = max(peak, len(jobs))
+                    pending = pending[len(batch) :]
+                if jobs and jobs[0][1].done():
+                    batch, task = jobs.pop(0)
+                    try:
+                        prepared = task.result()
+                    except ModelFailure as exc:
+                        # 拆分会改变来源 ID，后续快照须重新准备。
+                        await discard()
+                        await self.process(batch, extraction_error=exc)
+                    else:
+                        await self.process(batch, prepared=prepared)
+                    self.stream.last_check = self.clock()
+                    continue
+                if not ended and incoming is None and len(jobs) < settings.extraction_window:
+                    incoming = asyncio.create_task(anext(iterator))
+                waiting = ([incoming] if incoming else []) + ([jobs[0][1]] if jobs else [])
+                if self.minutes.task and not self.minutes.task.done():
+                    waiting.append(self.minutes.task)
+                if not waiting:
+                    continue
+                timeout = None
+                if pending and len(jobs) < settings.extraction_window:
+                    timeout = max(
+                        0.001, settings.checkpoint_seconds - (self.clock() - self.stream.last_check)
+                    )
+                if self.minutes.dirty and self.minutes.task is None and self.knowledge.facts:
+                    draft_wait = max(0.001, settings.minutes_interval -
+                                     (self.clock() - self.minutes.started))
+                    timeout = min(timeout, draft_wait) if timeout is not None else draft_wait
+                done, _ = await asyncio.wait(
+                    waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+                )
+                if incoming is not None and incoming in done:
+                    try:
+                        chunk = incoming.result()
+                    except StopAsyncIteration:
+                        ended = True
+                    else:
+                        self.ingest(chunk)
+                    incoming = None
+            await self.finalize()
+        finally:
+            if incoming is not None:
+                incoming.cancel()
+                await asyncio.gather(incoming, return_exceptions=True)
+            await discard()
+            await self.minutes.close()
+            if hasattr(iterator, "aclose"):
+                await iterator.aclose()
 
     async def cycle(self, mode="normal"):
         settings = self.context.settings
@@ -507,11 +625,8 @@ class MeetingEngine:
                     + "；主值班与备班必须分别记录负责人及其岗位。"
                 )
 
-    async def process(self, batch, depth=0):
+    async def extract(self, batch):
         meaningful = [s for s in batch if s.text.strip()]
-        if not meaningful:
-            self.commit(batch, [], [], {s.id: "whitespace" for s in batch})
-            return
         context_sources = []
         for source in reversed(self.stream.sources):
             if source.end > meaningful[0].start:
@@ -528,25 +643,88 @@ class MeetingEngine:
 
         def validate_wire(wire):
             context_ids = {s["id"] for s in context_sources}
+            mismatches = []
             for sid, record in wire.model_dump().items():
                 for value in record["facts"]:
                     refs = set(value["source_ids"])
                     if not refs <= context_ids and sid not in refs:
-                        raise ModelFailure(
-                            f"source_fact_mismatch: {sid} 下的事实至少引用本片段；不能把相邻发言的 ID 互换。text={value['text']}"
+                        message = f"source_fact_mismatch: {sid} 下的事实至少引用本片段；不能把相邻发言的 ID 互换。text={value['text']}"
+                        if not self.context.settings.local_extraction_retry:
+                            raise ExtractionFailure(message, [sid])
+                        mismatches.append((sid, message))
+            if mismatches:
+                raise ExtractionFailure(
+                    "\n".join(message for _, message in mismatches),
+                    dict.fromkeys(sid for sid, _ in mismatches),
+                )
+            try:
+                self.validate_extraction(unpack_extraction(wire), meaningful, list(context_ids))
+            except ModelFailure as exc:
+                bad = []
+                records = wire.model_dump()
+                ids = {s.id for s in meaningful}
+                for source in meaningful:
+                    record = records[source.id]
+                    # 只对不涉及本批其他记录的错误缩小范围；跨记录错误整批处理。
+                    refs = {sid for f in record["facts"] for sid in f["source_ids"]}
+                    if refs & (ids - {source.id}):
+                        raise exc
+                    one = extraction_schema([source.id]).model_validate({source.id: record})
+                    try:
+                        self.validate_extraction(
+                            unpack_extraction(one), [source], list(context_ids)
                         )
-            self.validate_extraction(unpack_extraction(wire), meaningful, list(context_ids))
+                    except ModelFailure:
+                        bad.append(source.id)
+                if bad:
+                    raise ExtractionFailure(str(exc), bad) from exc
+                raise
 
-        try:
-            wire = await self.stage(
-                "extract",
-                lambda: self.context.invoke(
-                    "extract",
-                    payload,
-                    extraction_schema([s.id for s in meaningful]),
-                    validate_wire,
-                ),
+        async def repair(wire, error):
+            ids = list(error.source_ids)
+            self.context.stats["local_extraction_retries"] = (
+                self.context.stats.get("local_extraction_retries", 0) + 1
             )
+            correction = {
+                **payload,
+                "sources": [s for s in payload["sources"] if s["id"] in ids],
+                "validation_error": str(error),
+                "instruction": "仅重新输出指定 sources 的完整结果，修正引用和覆盖错误。",
+            }
+
+            def merged(fixed):
+                return type(wire).model_validate({**wire.model_dump(), **fixed.model_dump()})
+
+            fixed = await self.context.invoke(
+                "extract",
+                correction,
+                extraction_schema(ids),
+                lambda fixed: validate_wire(merged(fixed)),
+                retry_validation=False,
+            )
+            return merged(fixed)
+
+        wire = await self.stage(
+            "extract",
+            lambda: self.context.invoke(
+                "extract",
+                payload,
+                extraction_schema([s.id for s in meaningful]),
+                validate_wire,
+                repair=repair if self.context.settings.local_extraction_retry else None,
+            ),
+        )
+        return wire
+
+    async def process(self, batch, depth=0, prepared=None, extraction_error=None):
+        meaningful = [s for s in batch if s.text.strip()]
+        if not meaningful:
+            self.commit(batch, [], [], {s.id: "whitespace" for s in batch})
+            return
+        try:
+            if extraction_error is not None:
+                raise extraction_error
+            wire = prepared if prepared is not None else await self.extract(batch)
             result = unpack_extraction(wire)
         except ModelFailure as exc:
             splittable = any(
@@ -555,6 +733,9 @@ class MeetingEngine:
             )
             if not splittable or depth >= 4:
                 raise
+            self.context.stats["extraction_splits"] = (
+                self.context.stats.get("extraction_splits", 0) + 1
+            )
             if len(batch) > 1:
                 middle = len(batch) // 2
                 await self.process(batch[:middle], depth + 1)
@@ -1065,6 +1246,26 @@ class MeetingEngine:
             self.context.emit("node.degraded", {"node": "chapter", "reason": str(exc)})
             return materialize([fid for item in items for fid in item.fact_ids])
 
+    async def bounded_map(self, operation, items):
+        results = []
+        width = (
+            self.context.settings.model_concurrency
+            if self.context.settings.parallel_chapters
+            else 1
+        )
+        for offset in range(0, len(items), width):
+            tasks = [
+                asyncio.create_task(operation(item)) for item in items[offset : offset + width]
+            ]
+            try:
+                results.extend(await asyncio.gather(*tasks))
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        return results
+
     async def select_items(self, topic, facts, limit):
         by_id = {f.id: f for f in facts}
 
@@ -1091,8 +1292,10 @@ class MeetingEngine:
             if page:
                 pages.append(page)
             selected = []
-            for page in pages:
-                chapter = await self.write_chapter(topic, page, limit)
+            chapters = await self.bounded_map(
+                lambda page: self.write_chapter(topic, page, limit), pages
+            )
+            for chapter in chapters:
                 selected.extend(fid for value in chapter.items for fid in value.fact_ids)
             selected = list(dict.fromkeys(selected))
             if len(selected) >= len(current):
@@ -1100,7 +1303,7 @@ class MeetingEngine:
             current = [item(fid) for fid in selected]
         return current
 
-    async def compose(self):
+    async def compose(self, on_output=None, commit=True):
         active = self.knowledge.summaries
         body_candidates = [
             f
@@ -1144,9 +1347,15 @@ class MeetingEngine:
             if not progressed:
                 break
         quotas["背景事实"] = min(remaining, len(buckets["背景事实"]))
-        for name, facts in buckets.items():
-            if quotas[name]:
-                current.extend(await self.select_items(name, facts, quotas[name]))
+
+        async def select_bucket(name):
+            return await self.select_items(name, buckets[name], quotas[name])
+
+        selections = await self.bounded_map(
+            select_bucket, [name for name in buckets if quotas[name]]
+        )
+        for selection in selections:
+            current.extend(selection)
         groups = defaultdict(list)
         for item in current:
             for fid in item.fact_ids:
@@ -1157,25 +1366,84 @@ class MeetingEngine:
                     )
                 )
         sections = [Chapter(title=topic, items=items) for topic, items in groups.items()]
+        narrative = None
         chunks = ["# " + escape(self.title or "会议纪要")]
-        for chapter in sections:
-            chunks += [
-                "## " + escape(chapter.title),
-                "\n".join(
-                    "- " + escape(i.text) + " （" + ", ".join(i.fact_ids) + "）"
-                    for i in chapter.items
-                ),
+        selected = [
+            by_id[fid] for fid in dict.fromkeys(fid for item in current for fid in item.fact_ids)
+        ]
+        if selected:
+            evidence = [
+                {
+                    "id": f.id,
+                    "source_ids": list(dict.fromkeys(f.source_ids[:1] + f.source_ids[-2:])),
+                }
+                for f in selected
             ]
-        chunks.append("## 完整事项清单")
-        for f in active:
-            detail = f"；负责人：{f.owner}" if f.owner else ""
-            detail += f"；期限：{f.due}" if f.due else ""
-            chunks.append(
-                f"- [{f.id} · {KIND_LABELS[f.kind]}/{STATUS_LABELS[f.status]}] {escape(f.text + detail)}"
+            refs = {sid for f in evidence for sid in f["source_ids"]}
+            payload = {
+                "facts": evidence,
+                "sources": [s.payload() for s in self.stream.sources if s.id in refs],
+            }
+            allowed = {f.id for f in selected}
+            minutes_schema = reader_minutes_schema([f.id for f in selected])
+
+            def validate_minutes(result):
+                paragraphs = [
+                    result.overview,
+                    *result.conclusions,
+                    *result.discussion,
+                    *result.actions,
+                    *result.open_questions,
+                ]
+                for index, paragraph in enumerate(paragraphs):
+                    for previous in paragraphs[:index]:
+                        if (
+                            min(len(paragraph.text), len(previous.text)) > 40
+                            and SequenceMatcher(None, paragraph.text, previous.text).ratio() > 0.72
+                        ):
+                            raise ModelFailure(
+                                "minutes_repeats_same_content:概述、结论和讨论不能重复同一组信息，删除重复段落，空类别返回空数组"
+                            )
+                if any(not set(p.fact_ids) <= allowed for p in paragraphs):
+                    raise ModelFailure("minutes_reference_invalid")
+                if any(
+                    re.search(
+                        r"f\d{6}|s\d+\.\d+|【(?:已确认|待确认)】|完整事项清单|原文索引", p.text
+                    )
+                    for p in paragraphs
+                ):
+                    raise ModelFailure("minutes_contains_internal_labels")
+
+            narrative = await self.context.invoke(
+                "minutes", payload, minutes_schema, validate_minutes,
+                on_output=(lambda delta: on_output("minutes", delta)) if on_output else None,
             )
-        self.knowledge.draft = MinuteDraft(
+            narrative = await self.context.invoke(
+                "minutes_review",
+                {**payload, "draft": narrative.model_dump(mode="json")},
+                minutes_schema,
+                validate_minutes,
+                on_output=(lambda delta: on_output("minutes_review", delta)) if on_output else None,
+            )
+            narrative = ReaderMinutes.model_validate(narrative.model_dump())
+            chunks.append(escape(narrative.overview.text))
+            for key, heading in [
+                ("conclusions", "主要结论"),
+                ("discussion", "讨论要点"),
+                ("actions", "后续安排"),
+                ("open_questions", "尚需明确"),
+            ]:
+                paragraphs = getattr(narrative, key)
+                if paragraphs:
+                    chunks.extend(
+                        ["## " + heading, "\n\n".join(escape(p.text) for p in paragraphs)]
+                    )
+        else:
+            chunks.append("本次记录未包含可整理的实质讨论内容。")
+        draft = MinuteDraft(
             title=self.title or "会议纪要",
             markdown="\n\n".join(chunks),
+            narrative=narrative,
             sections=sections,
             checklist=active,
             evidence_trace=[f.id for f in active],
@@ -1185,10 +1453,12 @@ class MeetingEngine:
                 "processed_sources": len(self.stream.dispositions),
                 "active_facts": len(active),
                 "checklist_facts": len(active),
+                "consumed_chars": self.stream.consumed,
             },
         )
-        self.context.emit("minutes.completed", self.knowledge.draft.model_dump(mode="json"))
-        self.context.emit("node.completed", {"node": "render"})
+        if commit:
+            self.knowledge.draft = draft
+        return draft
 
     async def finalize(self):
         if self.finalized:
@@ -1199,5 +1469,6 @@ class MeetingEngine:
         ):
             raise NoProgress("source_coverage_incomplete")
         if self.knowledge.facts:
-            await self.stage("chapter", self.compose)
+            await self.minutes.finish()
+        self.context.emit("node.completed", {"node": "render"})
         self.finalized = True

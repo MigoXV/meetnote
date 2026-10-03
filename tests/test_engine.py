@@ -23,7 +23,7 @@ class Scripted(MockClient):
 
     async def generate(self, task, instructions, context, schema):
         self.calls.append((task, context))
-        fn = self.handlers[task]
+        fn = self.handlers.get(task)
         if fn:
             return mock_result(task, context, schema, fn(context))
         return await super().generate(task, instructions, context, schema)
@@ -630,7 +630,8 @@ async def test_chapter_pages_do_not_drop_checklist_facts():
     assert len(draft.checklist) == 30
     assert sum(len(section.items) for section in draft.sections) <= 18
     assert set(draft.evidence_trace) == {f.id for f in runtime.knowledge.summaries}
-    assert all(f.text.replace("[模拟] ", "") in draft.markdown for f in draft.checklist)
+    assert len(draft.checklist) == 30
+    assert "完整事项清单" not in draft.markdown
 
 
 async def test_large_ledger_uses_multiple_bounded_selection_levels():
@@ -650,18 +651,19 @@ async def test_large_ledger_uses_multiple_bounded_selection_levels():
         )
         for i in range(120)
     ]
-    await runtime.compose()
-    assert len(runtime.knowledge.draft.checklist) == 120
-    assert sum(len(s.items) for s in runtime.knowledge.draft.sections) <= 18
-    assert len(model.calls) > 2
-    assert all(len(payload["items"]) <= 24 for _, payload in model.calls)
+    selected = await runtime.select_items("约束", runtime.knowledge.facts, 18)
+    assert len(selected) <= 18
+    assert len(runtime.knowledge.facts) == 120
+    calls = [(task, payload) for task, payload in model.calls if task == "chapter"]
+    assert len(calls) > 2
+    assert all(len(payload["items"]) <= 24 for _, payload in calls)
     assert all(
         item["text"].startswith("[constraint/confirmed]")
-        for _, payload in model.calls
+        for _, payload in calls
         for item in payload["items"]
     )
     assert all(
-        runtime.context.fits(task, payload, ChapterSelection) for task, payload in model.calls
+        runtime.context.fits(task, payload, ChapterSelection) for task, payload in calls
     )
 
 
@@ -1188,7 +1190,8 @@ async def test_action_cannot_replace_task_content_with_an_empty_reference():
     assert "重复率必须为零" in runtime.knowledge.facts[0].text
 
 
-async def test_source_records_cannot_exchange_neighbor_evidence_ids():
+@pytest.mark.parametrize("local_retry", [False, True])
+async def test_source_records_cannot_exchange_neighbor_evidence_ids(local_retry):
     class Misbound(MockClient):
         attempts = 0
 
@@ -1218,7 +1221,7 @@ async def test_source_records_cannot_exchange_neighbor_evidence_ids():
             )
 
     model = Misbound()
-    runtime, _ = engine(model)
+    runtime, _ = engine(model, local_extraction_retry=local_retry)
     await append(runtime, "甲场地关闭。")
     await append(runtime, "乙场地开放。")
     await runtime.finalize()
@@ -1396,7 +1399,7 @@ async def test_pending_decision_constraint_requests_correct_classification():
     await runtime.finalize()
     assert attempts == 2
     assert runtime.knowledge.facts[0].status == "unresolved"
-    assert "不作决定" not in runtime.knowledge.draft.markdown
+    assert all(f.kind != "constraint" for f in runtime.knowledge.draft.checklist)
 
 
 async def test_reaffirmed_uncertainty_cannot_resolve_old_question_using_other_confirmation():
@@ -1699,3 +1702,32 @@ async def test_added_verbatim_context_is_not_a_second_revision_of_same_source_de
     await runtime.finalize()
     assert len(runtime.knowledge.summaries) == 2
     assert any(f.kind == "decision" and f.status == "confirmed" for f in runtime.knowledge.facts)
+
+
+async def test_reader_minutes_keep_evidence_out_of_body():
+    runtime, _ = engine()
+    await append(runtime, "本次多人测试出现说话人归属错误，提出再次测试。")
+    await runtime.finalize()
+    draft = runtime.knowledge.draft
+    assert draft.narrative.overview.fact_ids
+    assert draft.checklist and draft.evidence_trace
+    assert "完整事项清单" not in draft.markdown
+    assert "原文索引" not in draft.markdown
+    assert "f000001" not in draft.markdown
+
+
+@pytest.mark.parametrize("invalid_task", ["minutes", "minutes_review"])
+async def test_invalid_narrative_never_becomes_successful_minutes(invalid_task):
+    class Invalid(MockClient):
+        async def generate(self, task, instructions, context, schema):
+            result = await super().generate(task, instructions, context, schema)
+            if task == invalid_task:
+                result = result.model_copy(update={"overview": result.overview.model_copy(update={"fact_ids": ["invented"]})})
+            return result
+
+    runtime, _ = engine(Invalid())
+    await append(runtime, "本次多人测试出现说话人归属错误。")
+    with pytest.raises(ModelFailure, match="minutes_reference_invalid"):
+        await runtime.finalize()
+    assert runtime.knowledge.draft is None
+    assert runtime.knowledge.facts

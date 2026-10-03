@@ -68,6 +68,7 @@ class Session:
                 for s in stream.sources
             ],
             "minutes": knowledge.draft.model_dump(mode="json") if knowledge.draft else None,
+            "minutes_preview": self.engine.minutes.preview,
             "warnings": list(knowledge.warnings),
             "stats": dict(self.engine.context.stats),
             "meeting_date": self.engine.meeting_date,
@@ -172,28 +173,23 @@ class SessionManager:
         session.events.publish("session.deleted", {"id": session_id})
 
     async def _worker(self, session: Session) -> None:
-        try:
+        async def chunks():
             while True:
                 if not session.queue.empty():
                     chunk = session.queue.get_nowait()
                     try:
-                        await session.engine.append(chunk)
+                        yield chunk
                     finally:
                         session.queue.task_done()
                     session.events.publish("input.processed", {"seq": chunk.seq})
                     continue
                 if session.status == "finalizing":
-                    break
+                    return
                 session.wake.clear()
-                # 定时检查点不能依赖下一个输入包到来。
-                try:
-                    await asyncio.wait_for(
-                        session.wake.wait(), max(self.settings.checkpoint_seconds, 0.05)
-                    )
-                except asyncio.TimeoutError:
-                    if session.engine.state["stream"].buffer:
-                        await session.engine.cycle()
-            await session.engine.finalize()
+                await session.wake.wait()
+
+        try:
+            await session.engine.run(chunks())
             session.status = "completed"
         except asyncio.CancelledError:
             raise

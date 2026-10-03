@@ -7,18 +7,25 @@ from time import perf_counter
 from meetnote.corpus.reader import read_transcripts
 from meetnote.domain.transcripts import TranscriptChunk
 from meetnote.engine.context import Context
+from meetnote.engine.models import create_model
 from meetnote.engine.runtime import MeetingEngine
-from meetnote.llm.client import ResponsesClient
 
 
 async def run_formal(
-    settings, directory: Path, names, emit=print, limit_segments=0, start_segment=1
+    settings,
+    directory: Path,
+    names,
+    emit=print,
+    limit_segments=0,
+    start_segment=1,
+    *,
+    stream_input=True,
 ):
     samples = {s.id: s for s in read_transcripts(directory)}
     manifest = {
         s["case_id"]: s for s in json.loads((directory / "dataset_manifest.json").read_text())
     }
-    model = ResponsesClient(settings)
+    model = create_model(settings)
     failures = 0
     try:
         for name in names:
@@ -62,19 +69,27 @@ async def run_formal(
             engine = MeetingEngine(context, sample.title, sample.meeting_date)
             error = None
             try:
-                for i, segment in enumerate(segments):
-                    start = engine.stream.cursor
-                    await engine.append(
-                        TranscriptChunk(
+
+                async def chunks():
+                    offset = 0
+                    for i, segment in enumerate(segments):
+                        chunk = TranscriptChunk(
                             chunk_id=segment.id,
                             speaker=segment.speaker,
                             text=segment.text + "\n",
                             seq=i + 1,
-                            start=start,
-                            end=start + len(segment.text) + 1,
+                            start=offset,
+                            end=offset + len(segment.text) + 1,
                         )
-                    )
-                await engine.finalize()
+                        offset = chunk.end
+                        yield chunk
+
+                if stream_input:
+                    await engine.run(chunks())
+                else:
+                    async for chunk in chunks():
+                        await engine.append(chunk)
+                    await engine.finalize()
             except Exception as exc:
                 error = str(exc)
                 failures += 1
@@ -146,6 +161,18 @@ async def run_formal(
                     )
                 )
             if engine.knowledge.draft:
+                emit(
+                    json.dumps(
+                        {
+                            "record": "narrative_review",
+                            "case": name,
+                            "narrative": engine.knowledge.draft.narrative.model_dump()
+                            if engine.knowledge.draft.narrative
+                            else None,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
                 if limit_segments:
                     emit(
                         json.dumps(
