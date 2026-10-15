@@ -15,7 +15,7 @@ poetry run meetnote serve
 
 访问 `http://127.0.0.1:8010`，API 文档位于 `/docs`。后端托管 `src/web/dist`；缺少构建产物时明确启动失败。VS Code 服务调试会先构建前端。`poetry build` 的 Python 包包含引擎和 Prompt，不包含前端构建产物。
 
-默认调用 `http://192.168.0.222:10001/v1/responses`，服务模型名为 `spark25`，使用流式 Responses、严格 JSON Schema、`store=false`、`enable_thinking=false`。不依赖服务端对话历史；`store=false` 不代表关闭前缀缓存。
+默认调用 `http://192.168.0.222:10001/v1/responses`，使用 Spark-X2.5-4B-INT8，服务模型名为 `spark25`，使用流式 Responses、严格 JSON Schema、`store=false`、`enable_thinking=false`。不依赖服务端对话历史；`store=false` 不代表关闭前缀缓存。
 
 ```bash
 poetry run meetnote serve --mock
@@ -89,10 +89,10 @@ MEETNOTE_EXTRACTION_WINDOW=2 MEETNOTE_LOCAL_EXTRACTION_RETRY=true MEETNOTE_PARAL
 
 局部纠正只保留已通过记录，对指定原文重新抽取，合并后再次完整校验；跨记录依赖不能安全定位时仍整批纠正。该策略不删除校验、不减少原文，也不改变抽取字段。
 
-在 BF16 决策服务就绪后运行同后端对照：
+主模型服务就绪后运行调用策略对照：
 
 ```bash
-MEETNOTE_DECISION_BACKEND=laya poetry run meetnote compare-strategy --case business_release_10k --rounds 3
+poetry run meetnote compare-strategy --case business_release_10k --rounds 3
 ```
 
 该命令交替运行串行基线与窗口 2、局部纠正、并行章节组合，各三次；两边都执行完整抽取与最终成文，不复用跨运行抽取结果，不包含模型加载时间。失败或有剩余原文的运行不能用于加速结论。人工标注仍只在推理结束后读取，会议输入、事件与结果只在内存及标准输出中，不写文件。
@@ -173,13 +173,11 @@ poetry run meetnote replay business_release_10k --directory data-bin/data
 
 所有评估结果仅输出标准输出，不生成会议记录文件。长会结果分别报告原文处理覆盖、事项覆盖、事实准确性、降级、调用、token 和耗时；“完成”不等于 428 条事实验收全部通过。验收要求所有关键检查通过且无虚构负责人／期限、错误修订或静默丢失，不以降低门槛替代修复。
 
-## BF16 双模型联调
+## 主模型联调与效果复核
 
-主模型负责抽取和章节整理，qwen-decider BF16 负责字段、关系及证据核验。独立实例使用 `MEETNOTE_DECISION_BACKEND=laya`、`MEETNOTE_LAYA_URL=http://127.0.0.1:10003`、`MEETNOTE_LAYA_FALLBACK=false`。启动检查和验收命令见 [联调说明](docs/INTEGRATION.md)。本阶段只验证真实流程跑通，不执行对照实验。
+抽取、字段核验、关系判断、证据核验、正文生成和审校统一调用 `spark25` 主模型。应用不再提供独立决策模型客户端、后端选择或回退配置；旧环境变量不会启用其他模型。联调命令见 [联调说明](docs/INTEGRATION.md)。
 
-## 效果与精度对照
-
-`evaluate-decisions --backend both` 检查独立决策，`compare-decisions` 检查复用抽取结果后的短流程，`review-quality --sample product_clean --details` 在内存中复跑完整会议并输出人工复核材料。结果及局限见 [BF16 质量对照报告](docs/QUALITY_COMPARISON.md)。不要将复用抽取的运行耗时当作系统加速比。
+`evaluate-decisions` 检查主模型的字段及关系核验；`review-quality --sample product_clean --details` 在内存中运行完整会议并输出人工复核材料。参考标注仅在模型处理结束后读取，不进入模型输入。
 
 ### 面向阅读的纪要
 

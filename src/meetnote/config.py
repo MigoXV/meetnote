@@ -14,10 +14,6 @@ class Settings(BaseSettings):
     base_url: str = "http://192.168.0.222:10001/v1"
     model: str = "spark25"
     api_key: str = Field(default="local", repr=False)
-    decision_backend: Literal["responses", "laya"] = "responses"
-    laya_url: str = "http://127.0.0.1:10003"
-    laya_timeout: float = Field(default=30, gt=0)
-    laya_fallback: bool = False
     thinking: bool = False
     temperature: float = Field(default=0, ge=0, le=2)
     model_timeout: float = Field(default=240, gt=0)

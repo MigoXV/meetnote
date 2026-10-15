@@ -1,4 +1,4 @@
-"""真实双模型联调；会议与事件仅在内存中处理。"""
+"""真实主模型联调；会议与事件仅在内存中处理。"""
 
 import asyncio
 import json
@@ -22,10 +22,8 @@ def check_snapshot(snapshot):
     if snapshot["error"] or snapshot["warnings"]:
         errors.append("error_or_degradation")
     stats = snapshot["stats"]
-    if not stats.get("responses_requests") or not stats.get("laya_requests"):
-        errors.append("both_models_not_observed")
-    if stats.get("decision_fallbacks", 0):
-        errors.append("unexpected_fallback")
+    if not stats.get("responses_requests"):
+        errors.append("main_model_not_observed")
     source_ids = {s["id"] for s in snapshot["sources"]}
     if any(not set(f["source_ids"]) <= source_ids for f in snapshot["facts"]):
         errors.append("invalid_fact_reference")
@@ -33,22 +31,16 @@ def check_snapshot(snapshot):
 
 
 async def run_integration(settings, url, emit=print):
-    if (
-        settings.provider != "responses"
-        or settings.decision_backend != "laya"
-        or settings.laya_fallback
-    ):
-        raise ValueError("联调要求真实 Responses + laya，且禁用回退")
+    if settings.provider != "responses":
+        raise ValueError("联调要求真实 Responses 主模型")
     failures = 0
 
     def report(line):
         nonlocal failures
         row = json.loads(line)
         stats = row["stats"]
-        if not stats.get("responses_requests") or not stats.get("laya_requests"):
-            row["errors"].append("both_models_not_observed")
-        if stats.get("decision_fallbacks", 0):
-            row["errors"].append("unexpected_fallback")
+        if not stats.get("responses_requests"):
+            row["errors"].append("main_model_not_observed")
         row["passed"] = not row["errors"]
         failures += not row["passed"]
         emit(
@@ -67,9 +59,7 @@ async def run_http(url, emit=print):
     failures = 0
     async with httpx.AsyncClient(base_url=url, timeout=30) as client:
         info = (await client.get("/api/v1/info")).raise_for_status().json()
-        assert info["provider"] == "responses" and info["decision_backend"] == "laya"
-        assert not info["decision_fallback"]
-        assert info["decision_model"]["precision"] == "bf16"
+        assert info["provider"] == "responses"
         sample = (await client.get("/api/v1/samples/product_clean")).raise_for_status().json()
         session = (
             (

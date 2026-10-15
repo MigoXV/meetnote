@@ -51,10 +51,6 @@ class Context:
         )
 
     def observe(self, data):
-        if data.get("fallback"):
-            self.stats["decision_fallbacks"] = self.stats.get("decision_fallbacks", 0) + 1
-            self.emit("model.fallback", data)
-            return
         backend = data.get("backend", "responses")
         self.stats[backend + "_requests"] = self.stats.get(backend + "_requests", 0) + 1
         self.stats[backend + "_elapsed_ms"] = self.stats.get(backend + "_elapsed_ms", 0) + data.get(
@@ -109,11 +105,7 @@ class Context:
         prompt = self.prompt(task)
         count = self.budget.check(prompt, context, schema)
         self.stats["tasks"] += 1
-        identity = (
-            await self.model.cache_identity(task) if hasattr(self.model, "cache_identity") else None
-        )
         key_data = [
-            identity,
             task,
             self.settings.base_url,
             self.settings.model,

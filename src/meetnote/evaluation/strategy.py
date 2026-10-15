@@ -3,12 +3,12 @@
 import json
 from statistics import median
 
+from meetnote.engine.models import model_info
 from meetnote.evaluation.formal import run_formal
-from meetnote.evaluation.paired import comparison_info
 
 
 async def compare_strategy(settings, directory, case, emit=print, rounds=3):
-    info = await comparison_info(settings)
+    info = await model_info(settings)
     emit(json.dumps({"record": "strategy_model", "info": info}, ensure_ascii=False))
     timings = {"baseline": [], "optimized": []}
     failures = 0
@@ -18,8 +18,6 @@ async def compare_strategy(settings, directory, case, emit=print, rounds=3):
             optimized = variant == "optimized"
             config = settings.model_copy(
                 update={
-                    "decision_backend": "laya",
-                    "laya_fallback": False,
                     "extraction_window": 2 if optimized else 1,
                     "local_extraction_retry": optimized,
                     "parallel_chapters": optimized,

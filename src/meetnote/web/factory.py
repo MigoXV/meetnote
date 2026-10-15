@@ -37,19 +37,6 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         client = model or (create_model(settings))
-        decision_info = None
-        if settings.decision_backend == "laya" and model is None:
-            try:
-                decision_info = await client.client.info()
-                if (
-                    decision_info.get("backend") != "vllm"
-                    or decision_info.get("precision") != "bf16"
-                ):
-                    raise RuntimeError("双模型联调要求 BF16 vLLM 决策服务")
-            except BaseException:
-                await client.close()
-                raise
-        app.state.decision_info = decision_info
         manager = SessionManager(settings, client)
         app.state.manager = manager
         manager.start()
@@ -81,9 +68,6 @@ def create_app(
             "model": settings.model,
             "nodes": list(STAGES),
             "persistence": False,
-            "decision_backend": settings.decision_backend,
-            "decision_fallback": settings.laya_fallback,
-            "decision_model": app.state.decision_info,
             "retention_seconds": settings.retention_seconds,
         }
 

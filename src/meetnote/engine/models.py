@@ -1,15 +1,14 @@
-"""入口共享模型组合根，避免服务与评估配置分叉。"""
+"""所有入口共用主模型；不再路由到独立决策服务。"""
 
-from meetnote.engine.decisions import DecisionRouter
 from meetnote.llm.client import ResponsesClient
-from meetnote.llm.laya import LayaClient
 from meetnote.llm.mock import MockClient
 
 
 def create_model(settings):
-    base = MockClient() if settings.provider == "mock" else ResponsesClient(settings)
-    if settings.decision_backend == "laya":
-        return DecisionRouter(
-            base, LayaClient(settings.laya_url, settings.laya_timeout), settings.laya_fallback
-        )
-    return base
+    return MockClient() if settings.provider == "mock" else ResponsesClient(settings)
+
+
+async def model_info(settings):
+    if settings.provider != "responses":
+        raise ValueError("真实评估不能使用 mock 主模型")
+    return {"model": settings.model, "base_url": settings.base_url, "provider": settings.provider}

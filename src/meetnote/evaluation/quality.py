@@ -5,20 +5,19 @@ import json
 
 from meetnote.corpus.reader import read_transcripts
 from meetnote.domain.transcripts import ChunkInput
-from meetnote.engine.models import create_model
-from meetnote.evaluation.paired import ExtractionReplay, comparison_info
+from meetnote.engine.models import create_model, model_info
+from meetnote.evaluation.paired import ExtractionReplay
 from meetnote.sessions.manager import SessionManager
 
 
 async def run_quality(settings, sample_id="product_clean", details=False, emit=print):
-    info = await comparison_info(settings)
+    info = await model_info(settings)
     emit(json.dumps({"record": "comparison_model", "model": info}, ensure_ascii=False))
     sample = next(s for s in read_transcripts(settings.corpus_dir) if s.id == sample_id)
     records = {}
     results = {}
-    # 先检查用户选择的 BF16，再使用相同抽取请求复核旧方案。
-    for backend in ("laya", "responses"):
-        config = settings.model_copy(update={"decision_backend": backend, "laya_fallback": False})
+    for backend in ("responses",):
+        config = settings
         model = ExtractionReplay(create_model(config), records)
         manager = SessionManager(config, model)
         try:
