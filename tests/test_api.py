@@ -83,5 +83,6 @@ def test_frontend_routes_and_api_fallback(tmp_path):
         for accept in ("application/json", "text/html"):
             assert client.get("/api/unknown", headers={"Accept": accept}).status_code == 404
         assert client.head("/api/unknown").status_code == 404
+        assert client.get("/v1/unknown", headers={"Accept": "text/html"}).status_code == 404
     with pytest.raises(RuntimeError, match="前端构建缺失"):
         make_app(dist=tmp_path / "missing")

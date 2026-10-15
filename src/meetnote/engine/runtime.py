@@ -244,6 +244,11 @@ class MeetingEngine:
         self.next_fact_id = 1
         self.minutes = RollingMinutes(self)
 
+    async def generate_fulltext(self, request_id, text, pipeline):
+        from meetnote.engine.fulltext import generate_fulltext
+
+        return await generate_fulltext(self, request_id, text, pipeline)
+
     @property
     def stream(self):
         return self.state["stream"]

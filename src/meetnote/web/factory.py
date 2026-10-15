@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from meetnote.config import Settings
@@ -12,7 +14,9 @@ from meetnote.engine.models import create_model
 from meetnote.engine.runtime import STAGES
 from meetnote.llm.client import ModelClient
 from meetnote.sessions.events import Event
+from meetnote.sessions.fulltext import FulltextService
 from meetnote.sessions.manager import TERMINAL, SessionError, SessionManager
+from meetnote.web.fulltext import router as fulltext_router
 from meetnote.web.schemas import (
     ChunkReceipt,
     CreateSession,
@@ -39,13 +43,25 @@ def create_app(
         client = model or (create_model(settings))
         manager = SessionManager(settings, client)
         app.state.manager = manager
+        fulltext = FulltextService(settings, client)
+        app.state.fulltext = fulltext
         manager.start()
         try:
             yield
         finally:
+            await fulltext.close()
             await manager.close()
 
     app = FastAPI(title="MeetNote", version="0.1.0", lifespan=lifespan)
+
+    app.include_router(fulltext_router)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        response = await request_validation_exception_handler(request, exc)
+        if request.url.path == "/v1/fulltext/generate":
+            response.status_code = 400
+        return response
 
     @app.exception_handler(SessionError)
     async def session_error(request: Request, exc: SessionError):
@@ -54,6 +70,7 @@ def create_app(
     def manager() -> SessionManager:
         return app.state.manager
 
+    @app.get("/health")
     @app.get("/health/live")
     async def live():
         return {"status": "ok"}
@@ -63,7 +80,7 @@ def create_app(
         return {
             "name": "MeetNote",
             "contract_version": 2,
-            "capabilities": ["rolling_minutes", "minutes_preview"],
+            "capabilities": ["rolling_minutes", "minutes_preview", "fulltext_generate"],
             "provider": settings.provider,
             "model": settings.model,
             "nodes": list(STAGES),
@@ -159,6 +176,10 @@ def create_app(
             if transcript.id == sample_id:
                 return transcript.model_dump()
         raise HTTPException(404, "sample_not_found")
+
+    @app.api_route("/v1/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def missing_v1(path: str):
+        raise HTTPException(404, "API route not found")
 
     @app.api_route("/api", methods=["GET", "HEAD"], include_in_schema=False)
     @app.api_route("/api/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)

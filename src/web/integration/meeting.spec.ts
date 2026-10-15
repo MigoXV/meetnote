@@ -26,7 +26,7 @@ test("真实 4B 主模型完整会议与会话释放", async ({ page, request })
   expect(snapshot.warnings).toEqual([]);
   expect(snapshot.stats.responses_requests).toBeGreaterThan(0);
   await page.getByRole("tab", { name: "最终纪要" }).click();
-  await expect(page.locator(".minutes")).toContainText("会议概述");
+  await expect(page.locator(".minutes")).toContainText(snapshot.title);
   await expect(page.locator(".transcript-chunk")).toHaveCount(24);
   await page.getByRole("button", { name: "取消并释放会话" }).click();
   await expect(page.getByText("让讨论，逐渐清晰。")).toBeVisible();

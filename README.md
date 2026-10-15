@@ -99,6 +99,42 @@ poetry run meetnote compare-strategy --case business_release_10k --rounds 3
 
 `stats.by_task` 提供请求数、输入输出 token、错误次数、累计请求和排队耗时、最多 256 条首个输出增量延迟；另有抽取窗口峰值、局部纠正与拆分计数。并发时请求累计耗时可能超过墙钟时间，端到端速度只能使用完整运行的 `elapsed_seconds`。上游排队和前缀缓存仍会影响测量，应同时查看每轮数据和质量，不把单次最好成绩当稳定收益。正式切换默认配置要求完整对照的耗时中位数至少下降 20%，且关键覆盖、负责人期限及最终纪要质量不退步。
 
+## 全文同步生成接口
+
+`POST /v1/fulltext/generate` 一次提交完整转写，等待全部所选能力执行后返回；不需要创建或结束会话。默认使用同一个 Spark-X2.5-4B-INT8 主模型。
+
+```bash
+curl --fail-with-body http://127.0.0.1:8010/v1/fulltext/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"meeting-001","text":"这里替换为完整会议转写正文，至少 80 字符。","pipeline":["minutes"]}'
+```
+
+成功响应：
+
+```json
+{"id":"meeting-001","minutes":{"markdown":"# 会议纪要\n……"}}
+```
+
+| 请求字段 | 说明 |
+| --- | --- |
+| `id` | 必填业务关联 ID，1～128 字符；首字符为英文字母或数字，其余允许字母、数字、点、下划线、冒号和连字符；不用于幂等去重 |
+| `text` | 必填完整转写，去除首尾空白后最多 60,000 字符 |
+| `pipeline` | 可选有序能力列表，不能重复或为空；默认 `["abstract","minutes","keywords","actions"]` |
+
+| 能力 | 响应字段 |
+| --- | --- |
+| `polish` | `polished_text`，润色全文；需要显式选择 |
+| `abstract` | `final_abstract`，独立生成会议摘要 |
+| `minutes` | `minutes.markdown`，复用 `MeetingEngine.run()` 的完整证据处理、成文和审校流程 |
+| `keywords` | `keywords`，当前固定为 `null`，不调用模型 |
+| `actions` | `next_actions.markdown`，独立生成工作计划，区分建议与已定分工 |
+
+未选择的产物字段不返回。能力按列表顺序执行，每项都读取原始转写，前一项产物不会自动成为后一项输入。摘要、工作计划和润色在引擎内按 token 预算切分；摘要与工作计划再逐层汇总，润色按原顺序拼接。每段都处理，不使用截断正文的方式规避预算；无法安全完成时返回明确失败提示。该流程复用当前主模型，不复制参考仓库的模型路由或业务图。
+
+少于 80 字符、有效字符少于 60、中文少于 20 字或有效字符占比低于 0.35 的材料不调用模型，返回 HTTP 200，提示写入 `message` 和所选产物字段。单项能力失败不阻止后续能力，返回 HTTP 200 和对应安全提示；有失败时须检查 `message`，不能仅凭 HTTP 200 判定成功。无内部地址、密钥和异常堆栈返回。请求格式不合法返回 400，正文超限返回 413，服务繁忙或排队超时返回 429，请求级异常返回 500。
+
+全文请求默认同时执行 2 场、最多等待 4 场，排队超时为 600 秒；配置为 `MEETNOTE_FULLTEXT_MAX_ACTIVE`、`MEETNOTE_FULLTEXT_MAX_WAITING`、`MEETNOTE_FULLTEXT_QUEUE_TIMEOUT`。所有任务共享主模型并发额度。客户端读取超时需覆盖排队与所有能力的总耗时。断连、请求取消和服务关闭会取消并清理任务；完成后立即释放全文请求状态，不出现在会话列表中，也不持久化会议内容。健康检查同时支持 `/health` 和 `/health/live`。
+
 ## API 与内存生命周期
 
 会话路径保持 `/api/v1/sessions`，快照契约升级为 `contract_version=2`，需要同步升级客户端。
