@@ -1,0 +1,84 @@
+/* 苍渊·白垣 / ABYSSUS · VALLUM — v1.1 locked tokens */
+:root {
+  /* Primitive — Abyssus */
+  --av-abyss: #080a0d;
+  --av-nocturne: #111820;
+  --av-forged-blue: #273746;
+  --av-startrace: #607d99;
+  --av-first-light: #9fc4e2;
+  --av-starleaf: #e7eef4;
+
+  /* Primitive — Vallum */
+  --av-pale-stone: #f8f7f2;
+  --av-ivory: #eeece5;
+  --av-patina-mist: #dce4e0;
+  --av-verdigris-frost: #afc2bc;
+  --av-rampart-shade: #637774;
+  --av-ink-bone: #252a2a;
+
+  /* Functional only */
+  --av-success: #6f8f83;
+  --av-warning: #b09464;
+  --av-danger: #a96f74;
+  --av-info: #607d99;
+
+  --av-radius-sm: 6px;
+  --av-radius-md: 8px;
+  --av-radius-lg: 12px;
+  --av-space: 8px;
+  --av-control-h: 40px;
+  --av-transition: 160ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+[data-theme="abyssus"] {
+  --bg-primary: #080a0d;
+  --bg-secondary: #0b0f13;
+  --surface: #111820;
+  --surface-subtle: #151e27;
+  --surface-raised: #1a2530;
+  --selected: #1d2b37;
+  --hover: #16212a;
+  --border: #273746;
+  --border-strong: #3a5268;
+  --text-primary: #e7eef4;
+  --text-secondary: #aab7c3;
+  --text-tertiary: #7c8b98;
+  --accent: #9fc4e2;
+  --accent-strong: #b4d2e9;
+  --accent-muted: #607d99;
+  --on-accent: #080a0d;
+  --focus: #789fbe;
+}
+
+[data-theme="vallum"] {
+  --bg-primary: #f8f7f2;
+  --bg-secondary: #f3f1ea;
+  --surface: #fcfbf8;
+  --surface-subtle: #eeece5;
+  --selected: #e3e9e5;
+  --hover: #edf1ee;
+  --border: #d8dcd7;
+  --border-strong: #c7cdc8;
+  --text-primary: #252a2a;
+  --text-secondary: #656c69;
+  --text-tertiary: #858d89;
+  --accent: #afc2bc;
+  --accent-strong: #5d706c;
+  --accent-muted: #dce4e0;
+  --on-accent: #252a2a;
+  --focus: #78968f;
+}
+
+html,
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+::selection {
+  background: var(--accent-muted);
+  color: var(--text-primary);
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
