@@ -191,21 +191,5 @@ def review_quality(
     asyncio.run(run_quality(Settings(), sample, details, typer.echo))
 
 
-@app.command("compare-embeddings")
-def compare_embeddings_command(
-    sample: str = typer.Option("product_asr_noisy", help="同输入比较关闭与启用向量"),
-    directory: Path = typer.Option(
-        Path("/workspace/model-bin/meetnote"), envvar="MEETNOTE_CORPUS_DIR"
-    ),
-    fulltext: bool = typer.Option(True, help="同时完成摘要与工作计划"),
-):
-    """真实主模型与 gRPC 向量对照，内容只在内存中处理。"""
-    from meetnote.evaluation.embeddings import compare_embeddings
-
-    summaries = asyncio.run(compare_embeddings(Settings(), sample, directory, typer.echo, fulltext))
-    if any(row.get("error") for row in summaries):
-        raise typer.Exit(1)
-
-
 if __name__ == "__main__":
     app()
