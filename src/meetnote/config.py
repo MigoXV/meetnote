@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     event_count: int = Field(default=1024, ge=1)
     event_bytes: int = Field(default=4 * 1024 * 1024, ge=1024)
     corpus_dir: Path = Path("/workspace/model-bin/meetnote")
+    embedding_enabled: bool = True
+    embedding_target: str = "127.0.0.1:50054"
+    embedding_timeout: float = Field(default=30, gt=0)
+    embedding_max_tokens: int = Field(default=512, ge=8, le=8192)
+    embedding_top_k: int = Field(default=6, ge=1, le=24)
+    embedding_min_score: float = Field(default=0.70, ge=-1, le=1)
+    embedding_cache_entries: int = Field(default=2048, ge=0)
+    embedding_cache_bytes: int = Field(default=16 * 1024 * 1024, ge=0)
 
     @model_validator(mode="after")
     def check_budget(self) -> "Settings":
