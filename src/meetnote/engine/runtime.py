@@ -137,7 +137,7 @@ def related(left, right):
     return bool(at & bt) and len(at & bt) / max(1, min(len(at), len(bt))) >= 0.34
 
 
-def eligible_pair(new, old, *, scope_quotes=True):
+def eligible_pair(new, old, *, scope_quotes=True, semantic=False):
     quotes = revision_quotes(new)
     if (
         scope_quotes
@@ -148,7 +148,7 @@ def eligible_pair(new, old, *, scope_quotes=True):
         )
     ):
         return False
-    if old.id >= new.id or not (related(new, old) or explicit_reference(new, old)):
+    if old.id >= new.id or not (related(new, old) or explicit_reference(new, old) or semantic):
         return False
     # 再次提出问题或建议不是修订证据；保留其状态，等待明确答复。
     if new.status != "confirmed" and (
@@ -953,6 +953,32 @@ class MeetingEngine:
                 seen.append(fact)
         new = novel
         old = self.candidates(new) + new[:-1]
+        semantic_pairs = set()
+        if self.context.vectors is not None:
+            from meetnote.embeddings.client import recall
+
+            queries = [f for f in new if relation_signals(self.evidence_view(f).text)]
+            documents = list(self.knowledge.summaries) + new
+            matches = await recall(
+                self.context.vectors,
+                [f.subject + "：" + f.text for f in queries],
+                [f.subject + "：" + f.text for f in documents],
+                self.context.settings.embedding_top_k,
+                self.context.settings.embedding_min_score,
+                allowed=[
+                    [i for i, candidate in enumerate(documents) if candidate.id < query.id]
+                    for query in queries
+                ],
+            )
+            by_id = {f.id: f for f in old}
+            for query, rows in zip(queries, matches):
+                for index, _ in rows:
+                    candidate = documents[index]
+                    if candidate.id < query.id:
+                        semantic_pairs.add((query.id, candidate.id))
+                        by_id[candidate.id] = candidate
+            old = list(by_id.values())
+            self.context.emit("embedding.recalled", {"pairs": len(semantic_pairs)})
 
         async def page(news, olds):
             views = {n.id: self.evidence_view(n) for n in news}
@@ -963,6 +989,7 @@ class MeetingEngine:
                 if eligible_pair(
                     views[n.id],
                     o,
+                    semantic=(n.id, o.id) in semantic_pairs,
                     scope_quotes=not (
                         relation_signals(n.text) & {"supersedes", "retracts"}
                         and not revision_quotes(n)

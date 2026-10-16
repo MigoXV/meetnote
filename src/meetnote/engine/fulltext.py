@@ -57,6 +57,13 @@ async def text_product(engine, name, text):
             raise ModelFailure("capability_output_empty")
         return result.text
 
+    async def finish(value):
+        if name in {"abstract", "actions"}:
+            from meetnote.embeddings.evidence import review_product
+
+            return await review_product(context, name, text, value)
+        return value
+
     parts = [
         await generate(part, "source")
         for part in windows(context, task, text, schema, "source")
@@ -67,7 +74,7 @@ async def text_product(engine, name, text):
     # 摘要与工作计划逐层汇总；每层完整读取上一层，禁止截断后假装全文成功。
     for _ in range(8):
         if len(parts) <= 1:
-            return parts[0] if parts else ""
+            return await finish(parts[0]) if parts else ""
         merged = "\n\n".join(parts)
         parts = [
             await generate(part, "merge")
@@ -86,6 +93,7 @@ async def generate_fulltext(engine, request_id, text, pipeline):
                 output["keywords"] = None
                 continue
             if name == "minutes":
+
                 async def inputs():
                     for chunk in chunks(text):
                         yield chunk
@@ -103,7 +111,9 @@ async def generate_fulltext(engine, request_id, text, pipeline):
             # 日志只记录定位信息；原文、响应正文和异常内容不落盘。
             logger.warning(
                 "fulltext capability failed id=%s capability=%s category=%s",
-                request_id, name, type(exc).__name__,
+                request_id,
+                name,
+                type(exc).__name__,
             )
             product = FAILURE_MESSAGE
             if product not in issues:

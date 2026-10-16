@@ -37,9 +37,18 @@ class Context:
             "usage_unknown": 0,
         }
     )
+    vectors: object = None
 
     def __post_init__(self):
         self.budget = Budget(self.settings)
+        if (
+            self.vectors is None
+            and self.settings.embedding_enabled
+            and self.settings.provider != "mock"
+        ):
+            from meetnote.embeddings.client import Vectors
+
+            self.vectors = Vectors(self.settings, self.stats, self.emit)
 
     def prompt(self, task):
         return files("meetnote.prompts").joinpath(f"{task}.txt").read_text(encoding="utf-8")
