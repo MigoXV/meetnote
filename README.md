@@ -17,6 +17,15 @@ poetry run meetnote serve
 
 默认调用 `http://192.168.0.222:10001/v1/responses`，使用 Spark-X2.5-4B-INT8，服务模型名为 `spark25`，使用流式 Responses、严格 JSON Schema、`store=false`、`enable_thinking=false`。不依赖服务端对话历史；`store=false` 不代表关闭前缀缓存。
 
+真实运行默认还使用独立 BGE-M3 gRPC 向量服务 `127.0.0.1:50054`。引擎项目位于 `/workspace/opusi/bgem3-emb`，启动示例：
+
+```bash
+cd /workspace/opusi/bgem3-emb
+poetry run bgem3-emb serve --model-dir /workspace/model-bin/BAAI/bge-m3 --device cuda:3 --dtype float16
+```
+
+MeetNote 仅安装 gRPC 客户端，不加载向量权重、Torch 或 ONNX Runtime。跨容器运行时配置 `MEETNOTE_EMBEDDING_TARGET` 为可达地址。`/health/ready` 检查向量引擎是否就绪，`/health/live` 只检查业务进程存活。显式设 `MEETNOTE_EMBEDDING_ENABLED=false` 可运行词项召回基线；mock 不访问向量服务。
+
 ```bash
 poetry run meetnote serve --mock
 ```
@@ -226,3 +235,32 @@ poetry run meetnote replay business_release_10k --directory data-bin/data
 SSE 新增 `minutes.started`、`minutes.delta`、`minutes.updated` 和 `minutes.aborted`。预览事件携带 `round`、`sequence`、`covered_chars` 和 `blocks`，只包含已解码的正文文本；正式提交事件携带完整 `minutes`。快照增加 `minutes_preview`，用于补发游标过期或断线恢复；该字段及所有会议数据仅存内存。`info.capabilities` 声明 `rolling_minutes` 和 `minutes_preview`，契约版本仍为 2。
 
 未完成的 JSON 转义、字段名和引用不进入预览正文。生成中的正文属于可撤回预览，只有完整校验和审校成功后才提交稳定纪要；失败撤回预览。结束时先处理全部尾部证据，正文覆盖最终消费位置时直接复用，否则完成最后一次更新后发布 `minutes.completed`。空会议不补造纪要。
+
+## 向量能力与验证
+
+协议副本位于 `src/meetnote/embeddings/proto/embedding.proto`，服务端真源位于引擎项目；两端通过 `scripts/run_grpcio_tools.sh` 生成 Python 和类型声明。接口只编码文本，返回有序、归一化的 1024 维向量和显式截断信息；不把模型分类、检索门槛或业务 Prompt 放入推理引擎。
+
+MeetNote 恢复的两个使用点：
+
+- 纪要事实核对：保留原词项及显式引文召回，对含修订/撤销/确认信号的新事实补充语义候选。最多为每条新事实召回 6 个候选，相似度默认下限 0.70。向量分数只让候选进入证据核对；原文范围、允许操作、单次最多六对和主模型核验仍然生效。相似不能直接触发删除、合并或修订。该阈值是可配置的初始召回门槛，不是“事实置信度”。
+- 全文摘要及工作计划：先按原流程处理全部原文，再对生成句子召回原始转写窗口；以原文位置和引用 ID 提交主模型审校。审校输出也使用产物的 Pydantic 长度约束。相同原文窗口去重，预算不足时按页打包审校，并预先分配含页间换行的总输出字符预算，不能截掉原文假装完成。证据相似度本身不证明句子为真。
+
+向量缓存在每个会议的 Context 中，仅存内存，默认最多 2048 条且不超过 16MiB 的文本/向量有效载荷。跨会议不共享内容缓存；单次 RPC 最多 64 条文本。整个会议保持同一个模型标识，服务中途换权重会明确失败，避免混用向量空间。RPC 故障不静默切回词项模式；有状态处理在提交前失败，消费位置不前移。全文能力延续独立失败及安全提示约定。统计增加 `embedding_requests/texts/elapsed_ms/truncated`，会话事件增加 `embedding.completed` 和 `embedding.recalled`。
+
+主要配置是 `.env.example` 中的 `MEETNOTE_EMBEDDING_*`。`MAX_TOKENS` 默认 512，兼容旧 ONNX 的 token 上限；业务客户端明确允许截断并累计截断数，原文仍完整进入抽取流程。调大服务和客户端上限需同时验证显存及召回质量。当前没有恢复旧项目依赖参考标注的会议分类器，也没有复制旧的向量阈值决策链。
+
+```bash
+poetry run pytest -q
+poetry run meetnote check-short --case owners --case amount --case question
+poetry run meetnote compare-embeddings --sample product_asr_noisy
+```
+
+`compare-embeddings` 用同一份转写比较关闭与启用向量：只在内存中复用抽取结果，字段和修订核验各自执行。输出统计包括耗时、请求数、原文消费、语义候选及参考标注的证据来源覆盖；来源覆盖不等于语义准确率。模型产物、事实账本和会议事件不落盘，参考标注只在推理结束后读取。该对照用于发现回归，单场对照不能证明普遍提速或质量提升。
+
+候选排名前先排除当前及后续事实，避免占用历史召回名额；语义查询只编码事实对象与命题正文，完整来源发言留给后续证据核验，避免同段其他事项干扰检索。真实 HTTP 长会议回放可运行：
+
+```bash
+poetry run python scripts/check_fulltext.py --sample business_release_10k --url http://127.0.0.1:8013
+```
+
+该脚本读取正式语料原文，通过默认能力列表执行完整流程，输出产物长度、成功状态和向量 RPC/批次数差值；不保存会议正文或产物。比对期间应使用独立实例，避免其他请求污染计数。
