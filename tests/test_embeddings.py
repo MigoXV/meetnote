@@ -101,18 +101,17 @@ async def test_semantic_recall_enables_paraphrase_but_does_not_commit_revision()
         return await original(task, instructions, payload, schema)
 
     ctx.model.generate = generate
-    assert not runtime.candidates([new])
     assert await runtime.reconcile([new]) == []
     assert calls[0]["allowed_pairs"] == [[new.id, old.id]]
     assert runtime.knowledge.facts == [old] and old.status == "confirmed"
 
 
-async def test_embedding_failure_and_cancel_do_not_advance_source_boundary():
+@pytest.mark.parametrize("text", ["最终确认设备改为周四交货。", "设备周四交货。"])
+async def test_embedding_failure_and_cancel_do_not_advance_source_boundary(text):
     encoder = Encoder()
     ctx = context(encoder)
     runtime = MeetingEngine(ctx)
     encoder.fail = True
-    text = "最终确认设备改为周四交货。"
     runtime.ingest(TranscriptChunk(chunk_id="1", seq=1, text=text, start=0, end=len(text)))
     with pytest.raises(ModelFailure):
         await runtime.cycle("flush")
@@ -191,6 +190,7 @@ def test_readiness_reports_embedding_failure_without_leaking_endpoint(monkeypatc
     async def fail(self):
         raise ModelFailure("embedding_rpc_unavailable")
 
+    monkeypatch.setenv("MEETNOTE_EMBEDDING_ENABLED", "false")
     monkeypatch.setattr(GrpcEncoder, "ready", fail)
     app = create_app(Settings(_env_file=None), model=MockClient(), frontend=False)
     with TestClient(app) as client:
@@ -198,6 +198,7 @@ def test_readiness_reports_embedding_failure_without_leaking_endpoint(monkeypatc
         result = client.get("/health/ready")
         assert result.status_code == 503
         assert result.json() == {"status": "embedding_unavailable"}
+        assert client.get("/api/v1/info").json()["embedding_enabled"] is True
 
 
 def test_mock_readiness_does_not_require_vector_engine():
@@ -263,3 +264,81 @@ async def test_paged_evidence_review_has_shared_output_budget_before_generation(
     assert len(result) == 1800
     assert sum(cap for _, cap in calls) + len(calls) - 1 == 1800
     assert all(len(payload["evidence"]) > 1 for payload, _ in calls)
+
+
+@pytest.mark.parametrize("same_batch", [False, True])
+@pytest.mark.parametrize("quoted", [False, True])
+async def test_no_vector_match_cannot_fall_back_to_subject_or_quote(same_batch, quoted):
+    class DifferentVectors(Encoder):
+        async def encode(self, texts):
+            self.calls.append(texts)
+            return (
+                self.model_id,
+                [array("f", [0, 1] if "改为" in text else [1, 0]) for text in texts],
+                0,
+            )
+
+    ctx = context(DifferentVectors())
+    engine = MeetingEngine(ctx)
+    texts = ["采购预算十万元。", "采购预算改为二十万元。"]
+    if quoted:
+        texts[1] = "此前“采购预算十万元”撤销，采购预算改为二十万元。"
+    facts = []
+    for seq, text in enumerate(texts, 1):
+        start = engine.stream.cursor
+        engine.ingest(
+            TranscriptChunk(
+                chunk_id=str(seq), seq=seq, text=text, start=start, end=start + len(text)
+            )
+        )
+        facts.append(
+            Fact(
+                id=f"f{seq:06}",
+                text=text,
+                subject="采购预算",
+                topic="预算",
+                kind="fact",
+                status="confirmed",
+                source_ids=[f"s{seq}.0"],
+            )
+        )
+    if not same_batch:
+        engine.knowledge.facts = facts[:1]
+    calls = []
+    original = ctx.model.generate
+
+    async def record(task, instructions, payload, schema):
+        calls.append(task)
+        return await original(task, instructions, payload, schema)
+
+    ctx.model.generate = record
+    assert await engine.reconcile(facts if same_batch else facts[1:]) == []
+    assert ctx.stats["embedding_requests"] > 0
+    assert "reconcile" not in calls
+    assert all(f.status == "confirmed" for f in facts)
+
+
+async def test_legacy_disable_setting_cannot_bypass_real_engine(monkeypatch):
+    monkeypatch.setenv("MEETNOTE_EMBEDDING_ENABLED", "false")
+    settings = Settings(_env_file=None)
+    ctx = Context(settings, MockClient(), lambda *_: None)
+    assert "embedding_enabled" not in Settings.model_fields
+    assert isinstance(ctx.vectors.encoder, GrpcEncoder)
+
+    async def fail(self, texts):
+        raise ModelFailure("embedding_rpc_unavailable")
+
+    monkeypatch.setattr(GrpcEncoder, "encode", fail)
+    engine = MeetingEngine(ctx)
+    text = "设备周四交货。"
+    engine.ingest(TranscriptChunk(chunk_id="1", seq=1, text=text, start=0, end=len(text)))
+    with pytest.raises(ModelFailure, match="embedding_rpc_unavailable"):
+        await engine.cycle("flush")
+    assert engine.stream.consumed == 0
+    assert not engine.knowledge.facts
+    output = await engine.generate_fulltext("required", text, ["abstract", "actions"])
+    from meetnote.engine.fulltext import FAILURE_MESSAGE
+
+    assert output["final_abstract"] == FAILURE_MESSAGE
+    assert output["next_actions"]["markdown"] == FAILURE_MESSAGE
+    assert output["message"]

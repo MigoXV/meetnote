@@ -25,8 +25,6 @@ def source_windows(text, target=240):
 
 
 async def review_product(context, name, source, product):
-    if context.vectors is None:
-        return product
     from meetnote.engine.fulltext import SCHEMAS
 
     base_schema = SCHEMAS[name]

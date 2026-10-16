@@ -77,7 +77,7 @@ def create_app(
 
     @app.get("/health/ready")
     async def ready():
-        if settings.embedding_enabled and settings.provider != "mock":
+        if settings.provider != "mock":
             from meetnote.embeddings.client import GrpcEncoder
             from meetnote.llm.client import ModelFailure
 
@@ -95,7 +95,7 @@ def create_app(
             "capabilities": ["rolling_minutes", "minutes_preview", "fulltext_generate"],
             "provider": settings.provider,
             "model": settings.model,
-            "embedding_enabled": settings.embedding_enabled and settings.provider != "mock",
+            "embedding_enabled": settings.provider != "mock",
             "nodes": list(STAGES),
             "persistence": False,
             "retention_seconds": settings.retention_seconds,

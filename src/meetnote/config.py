@@ -45,7 +45,6 @@ class Settings(BaseSettings):
     event_count: int = Field(default=1024, ge=1)
     event_bytes: int = Field(default=4 * 1024 * 1024, ge=1024)
     corpus_dir: Path = Path("/workspace/model-bin/meetnote")
-    embedding_enabled: bool = True
     embedding_target: str = "127.0.0.1:50054"
     embedding_timeout: float = Field(default=30, gt=0)
     embedding_max_tokens: int = Field(default=512, ge=8, le=8192)

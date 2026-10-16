@@ -817,7 +817,14 @@ async def test_relation_output_work_is_bounded_even_when_all_subjects_match(inco
         assert {f["id"] for f in page["candidates"]} == {pair[1] for pair in page["allowed_pairs"]}
     verified = [p for p in pages if not incomplete or len(p["allowed_pairs"]) == 1]
     pairs = [tuple(pair) for page in verified for pair in page["allowed_pairs"]]
-    assert len(set(pairs)) == len(pairs) == 66
+    # 历史候选也受向量 top-k 限制，不能回到旧的同主题全量两两核验。
+    expected = {
+        (f"f{new:06}", f"f{old:06}")
+        for new in range(2, 13)
+        for old in range(1, min(new, runtime.context.settings.embedding_top_k + 1))
+    }
+    assert len(set(pairs)) == len(pairs)
+    assert set(pairs) == expected
 
 
 async def test_literal_field_evidence_is_grounded_without_extra_inference():

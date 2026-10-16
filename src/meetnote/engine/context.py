@@ -41,14 +41,12 @@ class Context:
 
     def __post_init__(self):
         self.budget = Budget(self.settings)
-        if (
-            self.vectors is None
-            and self.settings.embedding_enabled
-            and self.settings.provider != "mock"
-        ):
+        if self.vectors is None:
             from meetnote.embeddings.client import Vectors
+            from meetnote.embeddings.mock import MockEncoder
 
-            self.vectors = Vectors(self.settings, self.stats, self.emit)
+            encoder = MockEncoder() if self.settings.provider == "mock" else None
+            self.vectors = Vectors(self.settings, self.stats, self.emit, encoder)
 
     def prompt(self, task):
         return files("meetnote.prompts").joinpath(f"{task}.txt").read_text(encoding="utf-8")

@@ -68,13 +68,18 @@ def test_selected_capabilities_run_in_order_and_read_original_text():
             json={"id": "selected", "text": TEXT, "pipeline": ["polish", "abstract", "keywords"]},
         ).json()
         assert set(body) == {"id", "polished_text", "final_abstract", "keywords"}
-        assert [task for task, _ in model.calls] == ["fulltext_polish", "fulltext_abstract"]
-        assert all(payload["text"] == TEXT for _, payload in model.calls)
+        assert [task for task, _ in model.calls] == [
+            "fulltext_polish",
+            "fulltext_abstract",
+            "fulltext_evidence",
+        ]
+        assert all(payload["text"] == TEXT for _, payload in model.calls[:2])
+        assert "".join(source["text"] for source in model.calls[2][1]["sources"]) == TEXT
         # 业务 ID 是关联 ID，不进行幂等去重，也不跨请求复用模型结果。
         client.post(
             "/v1/fulltext/generate", json={"id": "selected", "text": TEXT, "pipeline": ["polish"]}
         )
-        assert len(model.calls) == 3
+        assert len(model.calls) == 4
 
 
 @pytest.mark.parametrize(
@@ -223,9 +228,9 @@ async def test_summary_merges_all_windows_without_truncating_source():
     service = FulltextService(settings(cache_entries=0), model)
     text = TEXT * 30 + "原文最后的结论。"
     result = await service.run("summary", text, ("abstract",))
-    sources = [p["text"] for _, p in model.calls if p["phase"] == "source"]
+    sources = [p["text"] for _, p in model.calls if p.get("phase") == "source"]
     assert "".join(sources) == text
-    assert any(p["phase"] == "merge" for _, p in model.calls)
+    assert any(p.get("phase") == "merge" for _, p in model.calls)
     assert not result.get("message")
     assert result["final_abstract"]
     await service.close()
