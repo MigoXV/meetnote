@@ -119,7 +119,7 @@ def relation_signals(text):
 
 
 def related(left, right):
-    """候选召回只约束讨论对象，不根据此分数删除或修订事实。"""
+    """引用作用域保护：只放行同对象未决问题，不负责召回候选。"""
     a, b = left.subject.strip(), right.subject.strip()
     if a == b or a in b or b in a:
         return True
@@ -148,7 +148,7 @@ def eligible_pair(new, old, *, scope_quotes=True):
         )
     ):
         return False
-    if old.id >= new.id or not (related(new, old) or explicit_reference(new, old)):
+    if old.id >= new.id:
         return False
     # 再次提出问题或建议不是修订证据；保留其状态，等待明确答复。
     if new.status != "confirmed" and (
@@ -171,22 +171,6 @@ def quote_matches(quote, text):
     core = re.sub(r"^(?:本期|本轮|当前|共有|原定|原计划|计划|先)+", "", quote)
     a, b = terms(core), terms(text)
     return len(a & b) >= 5 and len(a & b) / max(1, len(a)) >= 0.75
-
-
-def explicit_reference(new, old):
-    """原文明示引用或分歧时，不能因主题命名变化漏掉候选；这里只召回。"""
-    signals = relation_signals(new.text)
-    if not signals:
-        return False
-    if "conflicts" in signals:
-        a, b = terms(new.subject), terms(old.subject)
-        if a & b and len(a & b) / max(1, min(len(a), len(b))) >= 0.34:
-            return True
-    if "retracts" in signals and old.status in {"proposed", "unresolved"}:
-        a, b = terms(new.text), terms(old.text)
-        if len(a & b) >= 5 and len(a & b) / max(1, min(len(a), len(b))) >= 0.15:
-            return True
-    return any(quote_matches(quote, old.text) for quote in revision_quotes(new))
 
 
 def identity(fact):
@@ -239,10 +223,14 @@ class MeetingEngine:
         self.title, self.meeting_date = title, meeting_date
         self.state = {"stream": StreamState(last_check=clock()), "knowledge": KnowledgeState()}
         self.source_index = {}
-        self.fact_index = defaultdict(set)
         self.finalized = False
         self.next_fact_id = 1
         self.minutes = RollingMinutes(self)
+
+    async def generate_fulltext(self, request_id, text, pipeline):
+        from meetnote.engine.fulltext import generate_fulltext
+
+        return await generate_fulltext(self, request_id, text, pipeline)
 
     @property
     def stream(self):
@@ -892,19 +880,6 @@ class MeetingEngine:
         ]
         return fact.model_copy(update={"text": fact.text + "\n" + "\n".join(evidence)})
 
-    def candidates(self, new):
-        found = set()
-        for f in new:
-            for term in terms(f.subject + f.topic):
-                found.update(self.fact_index.get(term, ()))
-        views = [self.evidence_view(f) for f in new]
-        return [
-            f
-            for f in self.knowledge.summaries
-            if (f.id in found and any(related(f, n) for n in new))
-            or any(explicit_reference(n, f) for n in views)
-        ]
-
     def relation_payload(self, new, old):
         candidates = []
         for fact in old:
@@ -947,7 +922,31 @@ class MeetingEngine:
                 novel.append(fact)
                 seen.append(fact)
         new = novel
-        old = self.candidates(new) + new[:-1]
+        from meetnote.embeddings.client import recall
+
+        # 每批新事实都进入向量空间；服务失败时不能提交纯大模型结果。
+        await self.context.vectors.encode([f.subject + "：" + f.text for f in new])
+        queries = [f for f in new if relation_signals(self.evidence_view(f).text)]
+        documents = list(self.knowledge.summaries) + new
+        matches = await recall(
+            self.context.vectors,
+            [f.subject + "：" + f.text for f in queries],
+            [f.subject + "：" + f.text for f in documents],
+            self.context.settings.embedding_top_k,
+            self.context.settings.embedding_min_score,
+            allowed=[
+                [i for i, candidate in enumerate(documents) if candidate.id < query.id]
+                for query in queries
+            ],
+        )
+        semantic_pairs, by_id = set(), {}
+        for query, rows in zip(queries, matches):
+            for index, _ in rows:
+                candidate = documents[index]
+                semantic_pairs.add((query.id, candidate.id))
+                by_id[candidate.id] = candidate
+        old = list(by_id.values())
+        self.context.emit("embedding.recalled", {"pairs": len(semantic_pairs)})
 
         async def page(news, olds):
             views = {n.id: self.evidence_view(n) for n in news}
@@ -955,7 +954,8 @@ class MeetingEngine:
                 (n, o)
                 for n in news
                 for o in olds
-                if eligible_pair(
+                if (n.id, o.id) in semantic_pairs
+                and eligible_pair(
                     views[n.id],
                     o,
                     scope_quotes=not (
@@ -1187,9 +1187,6 @@ class MeetingEngine:
         self.next_fact_id += len(new)
         self.knowledge.facts = [by_id[f.id] for f in facts]
         self.knowledge.revisions = revisions
-        for f in self.knowledge.facts:
-            for term in terms(f.subject + f.topic):
-                self.fact_index[term].add(f.id)
         self.stream.dispositions.update(dispositions)
         del self.stream.pending[: len(batch)]
         self.stream.consumed = batch[-1].end

@@ -14,6 +14,7 @@ export interface Chunk {
   text: string;
   speaker: string | null;
   seq: number;
+  timestamp?: string | null;
 }
 export interface Fact {
   id: string;
@@ -42,7 +43,13 @@ export interface Revision {
   reason: string;
   source_ids: string[];
 }
+export interface ChunkReceipt {
+  chunk_id: string;
+  seq: number;
+  duplicate: boolean;
+}
 export interface Minutes {
+  narrative?: { overview: { text: string; fact_ids: string[] } };
   title: string;
   markdown: string;
   evidence_trace: string[];
@@ -83,6 +90,12 @@ export interface Snapshot extends SessionRow {
   };
   meeting_date: string;
   minutes: Minutes | null;
+  minutes_preview?: {
+    blocks: Record<string, string>;
+    covered_chars: number;
+    round: number;
+    sequence: number;
+  } | null;
   warnings: string[];
   event_cursor: number;
 }

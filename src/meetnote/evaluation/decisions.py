@@ -9,7 +9,6 @@ from time import perf_counter
 from meetnote.engine.context import Context
 from meetnote.engine.models import create_model
 from meetnote.evaluation.decision_cases import CASES
-from meetnote.evaluation.paired import comparison_info
 
 
 def oracle(case):
@@ -55,17 +54,12 @@ def perturb(case, result, rate, seed, profile="mixed"):
     return result, True
 
 
-async def run_decisions(settings, emit=print, backends=("responses", "laya")):
+async def run_decisions(settings, emit=print):
     if settings.provider != "responses":
         raise ValueError("真实对照不能使用 mock 主模型")
-    if "laya" in backends:
-        info = await comparison_info(settings)
-        emit(json.dumps({"record": "comparison_model", "model": info}, ensure_ascii=False))
     summaries = []
-    for backend in backends:
-        model = create_model(
-            settings.model_copy(update={"decision_backend": backend, "laya_fallback": False})
-        )
+    for backend in ("responses",):
+        model = create_model(settings)
         counts = Counter()
         started = perf_counter()
         ctx = Context(settings, model, lambda *_: None)

@@ -17,8 +17,7 @@ async def test_strategy_alternates_without_replay_and_reports_complete_pairs(mon
                 settings.extraction_window,
                 settings.local_extraction_retry,
                 settings.parallel_chapters,
-                settings.decision_backend,
-                settings.laya_fallback,
+                settings.model,
             )
         )
         emit(
@@ -33,14 +32,14 @@ async def test_strategy_alternates_without_replay_and_reports_complete_pairs(mon
         )
         return 0
 
-    monkeypatch.setattr(strategy, "comparison_info", info)
+    monkeypatch.setattr(strategy, "model_info", info)
     monkeypatch.setattr(strategy, "run_formal", formal)
     result = await strategy.compare_strategy(
         Settings(_env_file=None), tmp_path, "sample", lambda _: None
     )
     assert [c[0] for c in calls] == [False, True, True, False, False, True]
     assert all(
-        c[1:] == ((2, True, True, "laya", False) if c[0] else (1, False, False, "laya", False))
+        c[1:] == ((2, True, True, "spark25") if c[0] else (1, False, False, "spark25"))
         for c in calls
     )
     assert result["complete"]
@@ -64,7 +63,7 @@ async def test_failed_runs_are_not_reported_as_speedups(monkeypatch, tmp_path):
         )
         return int(stream_input)
 
-    monkeypatch.setattr(strategy, "comparison_info", info)
+    monkeypatch.setattr(strategy, "model_info", info)
     monkeypatch.setattr(strategy, "run_formal", formal)
     result = await strategy.compare_strategy(
         Settings(_env_file=None), tmp_path, "sample", lambda _: None

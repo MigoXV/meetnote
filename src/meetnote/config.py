@@ -14,10 +14,6 @@ class Settings(BaseSettings):
     base_url: str = "http://192.168.0.222:10001/v1"
     model: str = "spark25"
     api_key: str = Field(default="local", repr=False)
-    decision_backend: Literal["responses", "laya"] = "responses"
-    laya_url: str = "http://127.0.0.1:10003"
-    laya_timeout: float = Field(default=30, gt=0)
-    laya_fallback: bool = False
     thinking: bool = False
     temperature: float = Field(default=0, ge=0, le=2)
     model_timeout: float = Field(default=240, gt=0)
@@ -38,6 +34,9 @@ class Settings(BaseSettings):
     cache_bytes: int = Field(default=8 * 1024 * 1024, ge=0)
     checkpoint_seconds: float = Field(default=9, ge=0)
     minutes_interval: float = Field(default=10, ge=0)
+    fulltext_max_active: int = Field(default=2, ge=1)
+    fulltext_max_waiting: int = Field(default=4, ge=0)
+    fulltext_queue_timeout: float = Field(default=600, gt=0)
     max_sessions: int = Field(default=32, ge=1)
     queue_size: int = Field(default=256, ge=1)
     max_session_chars: int = Field(default=200_000, ge=1)
@@ -46,6 +45,13 @@ class Settings(BaseSettings):
     event_count: int = Field(default=1024, ge=1)
     event_bytes: int = Field(default=4 * 1024 * 1024, ge=1024)
     corpus_dir: Path = Path("/workspace/model-bin/meetnote")
+    embedding_target: str = "127.0.0.1:50054"
+    embedding_timeout: float = Field(default=30, gt=0)
+    embedding_max_tokens: int = Field(default=512, ge=8, le=8192)
+    embedding_top_k: int = Field(default=6, ge=1, le=24)
+    embedding_min_score: float = Field(default=0.70, ge=-1, le=1)
+    embedding_cache_entries: int = Field(default=2048, ge=0)
+    embedding_cache_bytes: int = Field(default=16 * 1024 * 1024, ge=0)
 
     @model_validator(mode="after")
     def check_budget(self) -> "Settings":

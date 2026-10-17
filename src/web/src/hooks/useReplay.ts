@@ -97,7 +97,11 @@ export function useReplay(reportError: (message: string) => void) {
         await api(`/sessions/${replay.session}/finalize`, "POST");
       }
     } catch (e) {
-      if (valid()) reportError(e instanceof Error ? e.message : String(e));
+      if (valid())
+        reportError(
+          "回放提交或自动收尾失败：" +
+            (e instanceof Error ? e.message : String(e)),
+        );
     } finally {
       if (valid()) {
         running.current = false;
@@ -111,8 +115,24 @@ export function useReplay(reportError: (message: string) => void) {
     create: (title: string, meetingDate?: string) => Promise<string>,
   ) {
     reset();
-    const transcript = await api<Transcript>("/samples/" + sampleId);
-    const session = await create(transcript.title, transcript.meeting_date);
+    let transcript: Transcript;
+    try {
+      transcript = await api<Transcript>("/samples/" + sampleId);
+    } catch (e) {
+      throw new Error(
+        "样本读取失败：" + (e instanceof Error ? e.message : String(e)),
+        { cause: e },
+      );
+    }
+    let session: string;
+    try {
+      session = await create(transcript.title, transcript.meeting_date);
+    } catch (e) {
+      throw new Error(
+        "会话创建失败：" + (e instanceof Error ? e.message : String(e)),
+        { cause: e },
+      );
+    }
     currentReplay.current = { session, transcript, index: 0 };
     setProgress({ current: 0, total: transcript.segments.length });
     void resume();

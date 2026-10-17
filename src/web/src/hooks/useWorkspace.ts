@@ -106,6 +106,8 @@ export function useWorkspace(reportError: (message: string) => void) {
           "input.processed",
           "facts.updated",
           "minutes.completed",
+          "minutes.updated",
+          "minutes.aborted",
           "session.terminal",
           "session.cancelled",
         ].includes(item.type)

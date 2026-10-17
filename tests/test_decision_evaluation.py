@@ -35,22 +35,6 @@ async def test_injected_missed_revision_changes_ledger():
     assert not result["ledger_passed"]
 
 
-async def test_decision_fixture_has_sources_required_by_real_adapter():
-    from meetnote.engine.decisions import DecisionTasks
-
-    class Choices:
-        async def decide(self, task, state, questions, fingerprint):
-            assert state["原文"]
-            assert "expected" not in state
-            return {"answer": {"choice": "none"}}
-
-    for case in CASES:
-        if case.task == "reconcile":
-            payload, schema = case.payload()
-            result = await DecisionTasks(Choices(), "fixture").reconcile(payload, schema)
-            assert schema.model_validate(result).p0.kind == "none"
-
-
 async def test_extraction_replay_requires_identical_input_and_does_not_replay_decisions():
     from pydantic import BaseModel
 

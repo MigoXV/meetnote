@@ -1,11 +1,28 @@
 {
   "version": "0.2.0",
   "configurations": [
-    {"name": "MeetNote 服务", "type": "debugpy", "request": "launch",
-     "module": "meetnote.commands.app", "args": ["serve"], "console": "integratedTerminal",
-     "envFile": "${workspaceFolder}/.env", "preLaunchTask": "web: build"},
-    {"name": "MeetNote 语料校验", "type": "debugpy", "request": "launch",
-     "module": "meetnote.commands.app", "args": ["validate-corpus"], "console": "integratedTerminal",
-     "envFile": "${workspaceFolder}/.env"}
+    {
+      "name": "MeetNote 服务",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "meetnote.commands.app",
+      "args": [
+        "serve"
+      ],
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "preLaunchTask": "web: build"
+    },
+    {
+      "name": "MeetNote 语料校验",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "meetnote.commands.app",
+      "args": [
+        "validate-corpus"
+      ],
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env"
+    }
   ]
 }
