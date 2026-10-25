@@ -18,6 +18,14 @@ def report(kind, **data):
     print(json.dumps({"kind": kind, **data}, ensure_ascii=False), flush=True)
 
 
+async def read_snapshot(client, url, cached=None):
+    response = await client.get(url)
+    if response.status_code == 404 and cached and cached.get("status") == "completed":
+        return cached
+    response.raise_for_status()
+    return response.json()
+
+
 class MemoryRuntime:
     def __init__(self, client, base, timeout):
         self.llm = SimpleNamespace(client=client, slots=asyncio.Semaphore(1))
@@ -81,6 +89,7 @@ async def replay(args):
         session = adapter.SummarySession(runtime, {"id": args.meeting_id, "title": "流式回归验证"})
         counts, repeated, requests = Counter(), Counter(), Counter()
         rounds, prior_sizes = {}, {}
+        last_snapshot = {}
         started = monotonic()
 
         async def observe():
@@ -98,7 +107,9 @@ async def replay(args):
                     event = json.loads(line[5:])
                     kind, data = event["type"], event.get("data", {})
                     counts[kind] += 1
-                    if kind == "model.started":
+                    if kind == "session.snapshot" and data.get("status"):
+                        last_snapshot["state"] = data
+                    elif kind == "model.started":
                         task = data.get("task", "")
                         digest = hashlib.sha256(
                             json.dumps(data.get("input"), sort_keys=True).encode()
@@ -139,9 +150,11 @@ async def replay(args):
                 await asyncio.sleep(30)
                 if not session.sid:
                     continue
-                state = (
-                    await client.get(args.summary_base + f"/api/v1/sessions/{session.sid}")
-                ).json()
+                state = await read_snapshot(
+                    client, args.summary_base + f"/api/v1/sessions/{session.sid}",
+                    last_snapshot.get("state"),
+                )
+                last_snapshot["state"] = state
                 report(
                     "progress",
                     elapsed=round(monotonic() - started),
@@ -168,7 +181,10 @@ async def replay(args):
                 if session.error:
                     raise session.error
             result = await asyncio.wait_for(session.finish(), args.timeout)
-            state = (await client.get(args.summary_base + f"/api/v1/sessions/{session.sid}")).json()
+            state = await read_snapshot(
+                client, args.summary_base + f"/api/v1/sessions/{session.sid}",
+                last_snapshot.get("state"),
+            )
             draft = state.get("minutes") or {}
             facts = {f["id"]: f for f in state.get("facts", [])}
             narrative = draft.get("narrative") or {}
