@@ -224,6 +224,8 @@ poetry run meetnote replay business_release_10k --directory data-bin/data
 
 ## 主模型联调与效果复核
 
+单场会议上下文复用、Zoom UCL 适用边界及当前 NPU 模型的缓存实测见 [上下文与前缀缓存研究](docs/UCL_CONTEXT_RESEARCH.md)。会话快照的 `stats.by_task` 按任务提供实际 `cached_tokens`、缓存计数已知的请求数／输入量和 `cache_hit_ratio`；上游未报告缓存计数时比率为 `null`，不将未知当作未命中。
+
 抽取、字段核验、关系判断、证据核验、正文生成和审校统一调用 `spark25` 主模型。应用不再提供独立决策模型客户端、后端选择或回退配置；旧环境变量不会启用其他模型。联调命令见 [联调说明](docs/INTEGRATION.md)。
 
 `evaluate-decisions` 检查主模型的字段及关系核验；`review-quality --sample product_clean --details` 在内存中运行完整会议并输出人工复核材料。参考标注仅在模型处理结束后读取，不进入模型输入。

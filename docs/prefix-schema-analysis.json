@@ -1,0 +1,21 @@
+{
+  "model": "qwen3.8-27b-optimized-v1",
+  "schema_prefix_analysis": [
+    {
+      "task": "extract",
+      "shared_system_body_tokens": 1546,
+      "system_body_tokens": [
+        1601,
+        1601
+      ]
+    },
+    {
+      "task": "minutes",
+      "shared_system_body_tokens": 634,
+      "system_body_tokens": [
+        1101,
+        1117
+      ]
+    }
+  ]
+}
