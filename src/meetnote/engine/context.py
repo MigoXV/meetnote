@@ -37,9 +37,16 @@ class Context:
             "usage_unknown": 0,
         }
     )
+    vectors: object = None
 
     def __post_init__(self):
         self.budget = Budget(self.settings)
+        if self.vectors is None:
+            from meetnote.embeddings.client import Vectors
+            from meetnote.embeddings.mock import MockEncoder
+
+            encoder = MockEncoder() if self.settings.provider == "mock" else None
+            self.vectors = Vectors(self.settings, self.stats, self.emit, encoder)
 
     def prompt(self, task):
         return files("meetnote.prompts").joinpath(f"{task}.txt").read_text(encoding="utf-8")
@@ -49,6 +56,14 @@ class Context:
             self.budget.input_count(self.prompt(task), payload, schema)
             <= self.settings.input_token_budget
         )
+
+    @staticmethod
+    def validation_input(context, error):
+        return {
+            **context,
+            "validation_error": str(error),
+            "instruction": "重新输出完整结果，修正引用和覆盖错误。",
+        }
 
     def observe(self, data):
         backend = data.get("backend", "responses")
@@ -153,11 +168,7 @@ class Context:
                     )
                     if not retry_validation:
                         raise ModelFailure("task_validation_failed:" + str(exc)) from exc
-                    correction = {
-                        **context,
-                        "validation_error": str(exc),
-                        "instruction": "重新输出完整结果，修正引用和覆盖错误。",
-                    }
+                    correction = self.validation_input(context, exc)
                     with_output = {**correction, "invalid_output": result.model_dump(mode="json")}
                     if self.fits(task, with_output, schema):
                         correction = with_output

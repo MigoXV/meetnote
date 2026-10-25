@@ -17,6 +17,15 @@ poetry run meetnote serve
 
 默认调用 `http://192.168.0.222:10001/v1/responses`，使用 Spark-X2.5-4B-INT8，服务模型名为 `spark25`，使用流式 Responses、严格 JSON Schema、`store=false`、`enable_thinking=false`。不依赖服务端对话历史；`store=false` 不代表关闭前缀缓存。
 
+真实运行强制使用独立 BGE-M3 gRPC 向量服务 `127.0.0.1:50054`。引擎项目位于 `/workspace/opusi/bgem3-emb`，启动示例：
+
+```bash
+cd /workspace/opusi/bgem3-emb
+poetry run bgem3-emb serve --model-dir /workspace/model-bin/BAAI/bge-m3 --device cuda:3 --dtype float16
+```
+
+MeetNote 仅安装 gRPC 客户端，不加载向量权重、Torch 或 ONNX Runtime。跨容器运行时配置 `MEETNOTE_EMBEDDING_TARGET` 为可达地址。`/health/ready` 检查向量引擎是否就绪，`/health/live` 只检查业务进程存活。不提供关闭向量或纯大模型降级路径；旧的 `MEETNOTE_EMBEDDING_ENABLED` 配置已移除，设置它不会关闭向量。mock 使用固定向量替身走相同流程，不访问真实向量服务，也不代表语义准确率。
+
 ```bash
 poetry run meetnote serve --mock
 ```
@@ -103,6 +112,10 @@ poetry run meetnote compare-strategy --case business_release_10k --rounds 3
 
 `POST /v1/fulltext/generate` 一次提交完整转写，等待全部所选能力执行后返回；不需要创建或结束会话。默认使用同一个 Spark-X2.5-4B-INT8 主模型。
 
+全文纪要仍由 `MeetingEngine.run` 抽取、核验和消费全部原文，再执行最终成文与审校。该入口不生成应用不会读取的中间纪要；会话入口仍按原规则持续更新纪要。最终刷新失败会明确返回失败提示，不能用旧稿替代。
+
+摘要和计划的审校分页以每页 Pydantic Schema 的字符预算为准，并为校验纠正包预留输入空间。接近预算上限却未完成末句的结果会进入纠正重试，仍失败时明确报错；不会截掉已经生成的文字来满足长度约束。
+
 ```bash
 curl --fail-with-body http://127.0.0.1:8010/v1/fulltext/generate \
   -H 'Content-Type: application/json' \
@@ -118,7 +131,7 @@ curl --fail-with-body http://127.0.0.1:8010/v1/fulltext/generate \
 | 请求字段 | 说明 |
 | --- | --- |
 | `id` | 必填业务关联 ID，1～128 字符；首字符为英文字母或数字，其余允许字母、数字、点、下划线、冒号和连字符；不用于幂等去重 |
-| `text` | 必填完整转写，去除首尾空白后最多 60,000 字符 |
+| `text` | 必填完整转写，去除首尾空白后最多 200,000 字符 |
 | `pipeline` | 可选有序能力列表，不能重复或为空；默认 `["abstract","minutes","keywords","actions"]` |
 
 | 能力 | 响应字段 |
@@ -226,3 +239,77 @@ poetry run meetnote replay business_release_10k --directory data-bin/data
 SSE 新增 `minutes.started`、`minutes.delta`、`minutes.updated` 和 `minutes.aborted`。预览事件携带 `round`、`sequence`、`covered_chars` 和 `blocks`，只包含已解码的正文文本；正式提交事件携带完整 `minutes`。快照增加 `minutes_preview`，用于补发游标过期或断线恢复；该字段及所有会议数据仅存内存。`info.capabilities` 声明 `rolling_minutes` 和 `minutes_preview`，契约版本仍为 2。
 
 未完成的 JSON 转义、字段名和引用不进入预览正文。生成中的正文属于可撤回预览，只有完整校验和审校成功后才提交稳定纪要；失败撤回预览。结束时先处理全部尾部证据，正文覆盖最终消费位置时直接复用，否则完成最后一次更新后发布 `minutes.completed`。空会议不补造纪要。
+
+## 向量能力与验证
+
+协议副本位于 `src/meetnote/embeddings/proto/embedding.proto`，服务端真源位于引擎项目；两端通过 `scripts/run_grpcio_tools.sh` 生成 Python 和类型声明。接口只编码文本，返回有序、归一化的 1024 维向量和显式截断信息；不把模型分类、检索门槛或业务 Prompt 放入推理引擎。
+
+MeetNote 强制使用向量的两个环节：
+
+- 纪要事实核对：每批新事实必须先完成向量编码，对含修订/撤销/确认信号的新事实统一召回历史候选；同批事实也经过相同的向量排名和门槛。已移除词项索引召回及未经过向量召回的候选路径。最多为每条新事实召回 6 个候选，相似度默认下限 0.70。向量分数只让候选进入证据核对；原文范围、允许操作、单次最多六对和主模型核验仍然生效。相似不能直接触发删除、合并或修订。该阈值是可配置的初始召回门槛，不是“事实置信度”。
+- 全文摘要及工作计划：先按原流程处理全部原文，再对生成句子召回原始转写窗口；以原文位置和引用 ID 提交主模型审校。审校输出也使用产物的 Pydantic 长度约束。相同原文窗口去重，预算不足时按页打包审校，并预先分配含页间换行的总输出字符预算，不能截掉原文假装完成。证据相似度本身不证明句子为真。
+
+向量缓存在每个会议的 Context 中，仅存内存，默认最多 2048 条且不超过 16MiB 的文本/向量有效载荷。跨会议不共享内容缓存；单次 RPC 最多 64 条文本。整个会议保持同一个模型标识，服务中途换权重会明确失败，避免混用向量空间。RPC 故障不静默切回词项模式；有状态处理在提交前失败，消费位置不前移。全文能力延续独立失败及安全提示约定。统计增加 `embedding_requests/texts/elapsed_ms/truncated`，会话事件增加 `embedding.completed` 和 `embedding.recalled`。
+
+主要配置是 `.env.example` 中的 `MEETNOTE_EMBEDDING_*`。`MAX_TOKENS` 默认 512，兼容旧 ONNX 的 token 上限；业务客户端明确允许截断并累计截断数，原文仍完整进入抽取流程。调大服务和客户端上限需同时验证显存及召回质量。当前没有恢复旧项目依赖参考标注的会议分类器，也没有复制旧的向量阈值决策链。
+
+```bash
+poetry run pytest -q
+poetry run meetnote check-short --case owners --case amount --case question
+```
+
+已移除 `compare-embeddings` 命令及其无向量基线实现。真实服务验证使用下方完整 HTTP 回放，会议内容和产物仅存内存。
+
+候选排名前先排除当前及后续事实，避免占用历史召回名额；语义查询只编码事实对象与命题正文，完整来源发言留给后续证据核验，避免同段其他事项干扰检索。真实 HTTP 长会议回放可运行：
+
+```bash
+poetry run python scripts/check_fulltext.py --sample business_release_10k --url http://127.0.0.1:8013
+```
+
+该脚本读取正式语料原文，通过默认能力列表执行完整流程，输出产物长度、成功状态和向量 RPC/批次数差值；不保存会议正文或产物。比对期间应使用独立实例，避免其他请求污染计数。
+
+## V2 文档优先工作台
+
+V2 的定位是“文档优先、证据可追溯的会议摘要验证与复核工作台”。生产源码仍位于 `src/web`，沿用 React、TypeScript、Vite 和 pnpm；没有引入新的依赖、浏览器持久化或后端旁路。
+
+[Figma V2 桌面工作流](https://www.figma.com/design/1TAZwMSZ4UwczV1hxSgnxV?node-id=12-331) 与 [窄屏工作流](https://www.figma.com/design/1TAZwMSZ4UwczV1hxSgnxV?node-id=13-946) 位于独立 V2 页面，原“01 · 当前工作台”保留。文件内分为基础样式、组件、桌面工作流、窄屏工作流、交互与能力边界。Figma 的 10 段会议文本与 7 条当前事项均明确标记为演示数据，不是模型实测；其他压力及错误状态单独标注。
+
+| 旧入口与问题 | V2 入口与组织 | 能力分类 |
+| --- | --- | --- |
+| 当前会话与常驻样本配置挤在侧栏 | 216px 可折叠临时会话导航；未建会话单一启动区；开始后从“输入来源”打开样本、版本和速度 | 现有能力重排 |
+| 事实与阶段摘要共用半宽空面板 | 实时概览约 40/60 原文/结果，各栏一处主要滚动；阶段摘要与按类型分组的事项分开 | 重排；布局为前端补充 |
+| 最终纪要固定在半宽面板 | 最大 880px 的连续文档，按需查看依据 | 现有能力重排 |
+| 修订只显示前后正文 | 前后值、负责人、期限、原因、原安排与修订依据并排，窄屏改纵向 | 现有能力重排 |
+| 追加定稿文本挤占常驻高度 | 紧凑“追加转写”入口，可展开编辑器 | 前端补充 |
+| 七节点和长 JSON 常驻 | 底部状态条；按需打开七节点最近事件与折叠排查信息 | 现有能力重排 |
+| 证据只跳第一个片段 | 多引用、缺失引用说明、完整片段和前一片段上下文；关闭后恢复原事项焦点与阅读位置 | 前端补充 |
+| 窄屏先堆配置再堆双栏 | 概览 / 原文 / 纪要任务切换，导航与设置按需打开，独立证据面板 | 前端补充 |
+| 缺少带走纪要的出口 | 复制文本与下载 Markdown，可选择附上引用原文，标注阶段/最终与待确认项 | 已实现的前端补充 |
+
+关键真实行为与字段约束：
+
+- “新建并回放”仍新建临时会话，回放全部片段后仍自动收尾；现有暂停/继续只控制样本提交，不取消已接收内容的处理。读取样本、创建会话与回放/自动收尾失败分别说明。
+- `minutes_preview.blocks` 展示生成中预览；运行中已有 `minutes` 标为阶段纪要，只有 `completed` 才称最终纪要。接口没有正式纪要覆盖片段版本，不声称运行中的旧稿覆盖了最新输入。终态会话不能继续追加。
+- 当前事项排除 `superseded`、`retracted`、`resolved`，不等于“未完成任务”。`confirmed` 显示“会议表述明确”，不等于客观事实或人工复核。负责人、期限缺失分别显示“未指定”“未明确”。
+- 原文只显示真实 `seq`、`speaker` 和可空 `timestamp`。引用显示服务端原文证据文本及来源标识，不在页面伪造精确字符高亮。修订和运行事件无统一发生时间时显示修订号或事件序号。
+- 每次追加按 Unicode 字符计数，16000 上限与 Python/Pydantic 一致，表情不按 UTF-16 双倍计数。空白不提交，超限不截断，失败保留文本；相同内容的重试复用 `chunk_id`。Ctrl/Command + Enter 尊重 `isComposing`，Enter 默认换行。
+- 原文仅在跟随最新时随追加滚动；向上阅读后显示“有新片段，回到最新”。证据通过单独面板打开，避免改变原阅读位置。刷新不会重新挂载输入区。
+- 结束后保留时间读取服务配置，默认 5 分钟；服务重启立即释放是另一条件。不提供伪倒计时。404 后保留当前页面内存中的原文与结果，但不宣称可以恢复会话。释放会话前显式提醒保存。
+
+需要接口或产品确认、尚未接通的能力：人工复核与编辑记录、区分算法重分析/人工编辑的修订来源、事件与修订发生时间、准确过期倒计时、正式纪要覆盖版本、安全重试协议、PDF/Word、云分享或永久归档。本次没有将这些能力画成已可用的生产按钮。Figma 中复制、下载和提交只是路径演示；真实浏览器分别调用剪贴板、Blob 下载和现有追加接口。
+
+### 本次验证及限制
+
+```bash
+pnpm --dir src/web run build
+pnpm --dir src/web run lint
+pnpm --dir src/web run format:check
+pnpm --dir src/web exec playwright test tests/redesign.spec.ts tests/workspace.spec.ts
+poetry run pytest tests/test_api.py tests/test_sessions.py -q
+```
+
+浏览器行为测试中的演示数据只存在于 `tests/fixtures.ts`，通过明确的测试网络桩提供；不作为生产结果或真实模型评测。压力数据包含 160 个多段落片段、超过 4 万字、64 条事项和多引用，分多个议题与条件边界，不使用单句刷屏。
+
+检查的视口为 1440×900、1366×768、1024×768、390×844 与 320×844。检查包括窄屏重排、长中英文名称、正文放大、键盘分隔、证据返回、焦点、下载、超限、输入法合成事件保护、失败保留、幂等重试、跟随最新及会话过期。普通文字与控件边界分别按实际表面检查对比；选中背景上的小字采用主文字色，避免浅色强调值被误作重要文字或图标色。移动 44×44 是项目目标；[WCAG 2.2 的 2.5.8 AA 基线为 24×24 并含例外](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum)。不将有限自动检查称为完整合规认证。
+
+真实 mock 消费者测试验证创建、追加、回放、暂停/继续、自动收尾与释放接线。现有 mock 在长语料成文时可能触发 `ModelFailure`；界面会明确显示失败并保留阶段纪要和已接收原文，测试不将这种状态认定为成功生成最终纪要。短文本的完成路径另有断言。本次未改模型或引擎以掩盖该限制，未运行真实模型完整会议准确率评测。没有真人可用性测试；系统级中文输入法候选窗口与各操作系统原生浏览器缩放仍需人工复核。

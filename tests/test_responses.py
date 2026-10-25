@@ -71,6 +71,37 @@ async def test_responses_wire_contract_and_validation_correction():
     await client.close()
 
 
+@pytest.mark.parametrize("output_tokens,item_count", [(4096, 80), (8192, 160)])
+async def test_long_plan_uses_configured_output_budget_without_hidden_task_cap(output_tokens, item_count):
+    from meetnote.domain.fulltext import ActionsText
+
+    text = "\n".join(
+        f"第{i}项安排：物业按会议明确安排检查第{i}栋楼的消防设施。" for i in range(item_count)
+    )
+    requested = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        requested.append(body["max_output_tokens"])
+        final = "response.completed" if body["max_output_tokens"] >= 3000 else "response.incomplete"
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"},
+            text=sse(json.dumps({"text": text}, ensure_ascii=False), final),
+        )
+
+    sdk = openai.AsyncOpenAI(
+        api_key="local", base_url="http://test/v1", max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    client = ResponsesClient(Settings(_env_file=None, provider="mock", max_output_tokens=output_tokens), sdk)
+    try:
+        result = await client.generate("fulltext_actions", "Return JSON.", {}, ActionsText)
+        assert result.text == text
+        assert requested == [output_tokens]
+    finally:
+        await client.close()
+
+
 async def test_truncated_stream_is_not_success():
     from meetnote.engine.context import Context
 

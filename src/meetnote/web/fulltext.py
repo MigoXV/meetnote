@@ -54,8 +54,8 @@ async def generate(body: FulltextRequest, request: Request):
         raise HTTPException(400, "id must use letters, digits, '.', '_', ':' or '-'")
     if not text:
         raise HTTPException(400, "text must not be empty")
-    if len(text) > 60_000:
-        raise HTTPException(413, "text exceeds the current limit of 60000 characters")
+    if len(text) > 200_000:
+        raise HTTPException(413, "text exceeds the current limit of 200000 characters")
     pipeline = tuple(body.pipeline) if body.pipeline is not None else DEFAULT_PIPELINE
     if not pipeline or len(set(pipeline)) != len(pipeline):
         raise HTTPException(400, "pipeline must not be empty or contain duplicates")

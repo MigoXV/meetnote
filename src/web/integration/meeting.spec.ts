@@ -7,7 +7,7 @@ test("真实 4B 主模型完整会议与会话释放", async ({ page, request })
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/");
-  await expect(page.getByText("让讨论，逐渐清晰。")).toBeVisible();
+  await expect(page.getByText("会议摘要工作台")).toBeVisible();
   await page.getByLabel("会议样本").selectOption("product_clean");
   await page.getByLabel("回放速度").selectOption("0");
   await page.getByRole("button", { name: "新建并回放" }).click();
@@ -25,11 +25,12 @@ test("真实 4B 主模型完整会议与会话释放", async ({ page, request })
   expect(snapshot.error).toBeNull();
   expect(snapshot.warnings).toEqual([]);
   expect(snapshot.stats.responses_requests).toBeGreaterThan(0);
-  await page.getByRole("tab", { name: "最终纪要" }).click();
+  await page.getByRole("tab", { name: "会议纪要" }).click();
   await expect(page.locator(".minutes")).toContainText(snapshot.title);
   await expect(page.locator(".transcript-chunk")).toHaveCount(24);
   await page.getByRole("button", { name: "取消并释放会话" }).click();
-  await expect(page.getByText("让讨论，逐渐清晰。")).toBeVisible();
+  await page.getByRole("button", { name: "确认释放会话" }).click();
+  await expect(page.getByText("会议摘要工作台")).toBeVisible();
   expect(await (await request.get("/api/v1/sessions")).json()).toEqual([]);
   expect(errors).toEqual([]);
 });

@@ -75,6 +75,18 @@ def create_app(
     async def live():
         return {"status": "ok"}
 
+    @app.get("/health/ready")
+    async def ready():
+        if settings.provider != "mock":
+            from meetnote.embeddings.client import GrpcEncoder
+            from meetnote.llm.client import ModelFailure
+
+            try:
+                await GrpcEncoder(settings).ready()
+            except ModelFailure:
+                return JSONResponse(status_code=503, content={"status": "embedding_unavailable"})
+        return {"status": "ok"}
+
     @app.get("/api/v1/info")
     async def info():
         return {
@@ -83,6 +95,7 @@ def create_app(
             "capabilities": ["rolling_minutes", "minutes_preview", "fulltext_generate"],
             "provider": settings.provider,
             "model": settings.model,
+            "embedding_enabled": settings.provider != "mock",
             "nodes": list(STAGES),
             "persistence": False,
             "retention_seconds": settings.retention_seconds,

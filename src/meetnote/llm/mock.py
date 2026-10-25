@@ -4,6 +4,8 @@
 class MockClient:
     async def generate(self, task, instructions, context, schema):
         if task.startswith("fulltext_"):
+            if task == "fulltext_evidence":
+                return schema.model_validate({"text": context["draft"]})
             if task == "fulltext_polish":
                 return schema.model_validate({"text": "[模拟] " + context["text"]})
             limit = 500 if task == "fulltext_abstract" else 1800

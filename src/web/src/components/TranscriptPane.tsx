@@ -1,88 +1,94 @@
-import { FileText, Radio, Send } from "lucide-react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { Snapshot } from "../api";
-interface Props {
-  snapshot: Snapshot | null;
-  selected: string;
-  active: boolean;
-  text: string;
-  busy: boolean;
-  setText: (value: string) => void;
-  onSend: () => Promise<void>;
-}
 export function TranscriptPane({
   snapshot,
-  selected,
-  active,
-  text,
-  busy,
-  setText,
-  onSend,
-}: Props) {
+  onAppend,
+  canAppend,
+}: {
+  snapshot: Snapshot | null;
+  onAppend: () => void;
+  canAppend: boolean;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const follow = useRef(true);
+  const [unseen, setUnseen] = useState(0);
+  const seen = useRef(0);
+  useLayoutEffect(() => {
+    const count = snapshot?.chunks.length || 0;
+    const node = ref.current;
+    if (node && count > seen.current) {
+      if (follow.current && window.getSelection()?.isCollapsed !== false)
+        node.scrollTop = node.scrollHeight;
+      else {
+        const timer = window.setTimeout(
+          () => setUnseen(count - seen.current),
+          0,
+        );
+        return () => window.clearTimeout(timer);
+      }
+    }
+    seen.current = count;
+  }, [snapshot?.chunks.length]);
+  function latest() {
+    const node = ref.current!;
+    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+    follow.current = true;
+    seen.current = snapshot?.chunks.length || 0;
+    setUnseen(0);
+  }
   return (
     <section className="transcript-pane" aria-label="会议转写">
       <div className="pane-heading">
-        <h2>
-          <FileText size={16} />
-          转写原文
-        </h2>
-        <span className="muted">定稿片段</span>
+        <h2>转写原文</h2>
+        <span>{snapshot?.chunks.length || 0} 段</span>
       </div>
-      <div className="transcript-scroll">
+      <div
+        className="reading-scroll transcript-scroll"
+        ref={ref}
+        onScroll={() => {
+          const n = ref.current!;
+          follow.current = n.scrollHeight - n.scrollTop - n.clientHeight < 64;
+          if (follow.current) {
+            seen.current = snapshot?.chunks.length || 0;
+            setUnseen(0);
+          }
+        }}
+      >
         {snapshot?.chunks.length ? (
-          snapshot.chunks.map((chunk) => (
+          snapshot.chunks.map((c) => (
             <article
               className="transcript-chunk"
-              id={`chunk-${chunk.chunk_id}`}
-              key={chunk.chunk_id}
+              key={c.chunk_id}
+              id={`chunk-${c.chunk_id}`}
             >
-              <div>
-                <span className="speaker">{chunk.speaker || "发言人"}</span>
+              <div className="segment-meta">
                 <span className="segment-index">
-                  {String(chunk.seq).padStart(3, "0")}
+                  片段 {String(c.seq).padStart(2, "0")}
                 </span>
+                <span>{c.speaker || "发言人未提供"}</span>
+                {c.timestamp && <span>{c.timestamp}</span>}
               </div>
-              <p>{chunk.text}</p>
+              <p>{c.text}</p>
             </article>
           ))
         ) : (
           <div className="empty-state">
-            <Radio size={30} strokeWidth={1} />
-            <h3>等待第一段发言</h3>
-            <p>
-              回放一份样本，或在下方输入文本。
-              <br />
-              原文将按接收顺序保留。
-            </p>
+            <h3>等待定稿转写</h3>
+            <p>会话已建立。追加一段转写，或从输入来源回放样本。</p>
           </div>
         )}
       </div>
-      <form
-        className="input-area"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void onSend();
-        }}
-      >
-        <label htmlFor="text-input">追加定稿文本</label>
-        <textarea
-          id="text-input"
-          placeholder="例如：刚才的时间改一下，周四完成验收，周五再发布。"
-          maxLength={16000}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          disabled={!!selected && !active}
-        />
-        <div>
-          <span className="muted">{text.length} / 16000</span>
-          <button
-            className="button primary"
-            disabled={!text.trim() || busy || (!!selected && !active)}
-          >
-            <Send size={14} />
-            提交
-          </button>
-        </div>
-      </form>
+      {unseen > 0 && (
+        <button className="new-segments" onClick={latest}>
+          有新片段，回到最新
+        </button>
+      )}
+      <div className="append-bar">
+        <button className="button" onClick={onAppend} disabled={!canAppend}>
+          ＋ 追加转写
+        </button>
+        <span className="muted">已完成识别、不再实时改写的文本</span>
+      </div>
     </section>
   );
 }

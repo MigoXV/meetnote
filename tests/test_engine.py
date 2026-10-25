@@ -621,6 +621,65 @@ async def test_incomplete_single_revision_retries_once_and_never_silently_commit
     assert calls == 2
 
 
+class WrongRelationEvidence(Scripted):
+    def __init__(self, *, recover):
+        super().__init__(extract=lambda c: {"facts": [fact(s) for s in c["sources"]]})
+        self.recover = recover
+
+    async def generate(self, task, instructions, context, schema):
+        if task != "reconcile":
+            return await super().generate(task, instructions, context, schema)
+        self.calls.append((task, context))
+        values = {}
+        for key, pair in context["pairs"].items():
+            # 两种关系均被 Schema 允许，但“改为”句不能作为 retracts 的证据。
+            kind = "supersedes" if self.recover and len(context["pairs"]) == 1 else "retracts"
+            values[key] = {
+                "kind": kind,
+                "evidence_id": pair["evidence_ids"][0],
+                "reason": "核对原文中的取消安排",
+            }
+        return schema.model_validate(values)
+
+
+async def test_invalid_relation_batch_rechecks_every_pair_before_commit():
+    model = WrongRelationEvidence(recover=True)
+    runtime, _ = engine(model)
+    for i in range(8):
+        await append(runtime, f"采购预算原定第{i}版。")
+        await runtime.cycle("flush")
+    await append(runtime, "采购预算确认改为第八版。采购预算原方案取消。")
+    await append(runtime, "采购预算确认改为第九版。采购预算原方案取消。")
+    await runtime.finalize()
+    pages = [payload for task, payload in model.calls if task == "reconcile"]
+    batched = {tuple(pair) for p in pages if len(p["pairs"]) > 1 for pair in p["allowed_pairs"]}
+    singles = [tuple(p["allowed_pairs"][0]) for p in pages if len(p["pairs"]) == 1]
+    assert batched
+    assert set(singles) == batched
+    assert len(singles) == len(set(singles))
+    assert runtime.knowledge.revisions
+    assert all(revision.after.status == "superseded" for revision in runtime.knowledge.revisions)
+    assert runtime.stream.consumed == runtime.stream.cursor
+    assert runtime.finalized
+
+
+async def test_invalid_single_relation_preserves_pending_input_and_original_facts():
+    model = WrongRelationEvidence(recover=False)
+    runtime, _ = engine(model)
+    await append(runtime, "采购预算原定十万元。")
+    await runtime.cycle("flush")
+    before = runtime.stream.consumed
+    await append(runtime, "采购预算确认改为二十万元。采购预算原方案取消。")
+    with pytest.raises(ModelFailure, match="relation_evidence_invalid"):
+        await runtime.finalize()
+    assert len([task for task, _ in model.calls if task == "reconcile"]) == 2
+    assert runtime.stream.consumed == before
+    assert len(runtime.knowledge.facts) == 1
+    assert runtime.knowledge.facts[0].status == "confirmed"
+    assert not runtime.knowledge.revisions
+    assert not runtime.finalized
+
+
 async def test_chapter_pages_do_not_drop_checklist_facts():
     runtime, _ = engine(batch_tokens=512, source_tokens=128)
     for i in range(30):
@@ -817,7 +876,14 @@ async def test_relation_output_work_is_bounded_even_when_all_subjects_match(inco
         assert {f["id"] for f in page["candidates"]} == {pair[1] for pair in page["allowed_pairs"]}
     verified = [p for p in pages if not incomplete or len(p["allowed_pairs"]) == 1]
     pairs = [tuple(pair) for page in verified for pair in page["allowed_pairs"]]
-    assert len(set(pairs)) == len(pairs) == 66
+    # 历史候选也受向量 top-k 限制，不能回到旧的同主题全量两两核验。
+    expected = {
+        (f"f{new:06}", f"f{old:06}")
+        for new in range(2, 13)
+        for old in range(1, min(new, runtime.context.settings.embedding_top_k + 1))
+    }
+    assert len(set(pairs)) == len(pairs)
+    assert set(pairs) == expected
 
 
 async def test_literal_field_evidence_is_grounded_without_extra_inference():
