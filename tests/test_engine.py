@@ -693,6 +693,41 @@ async def test_chapter_pages_do_not_drop_checklist_facts():
     assert "完整事项清单" not in draft.markdown
 
 
+async def test_complete_evidence_within_budget_keeps_late_topic_in_minutes_input():
+    from meetnote.domain.results import Fact
+
+    model = Scripted()
+    runtime, _ = engine(
+        model, body_max_items=6, input_token_budget=32768, max_output_tokens=1024
+    )
+    for i in range(25):
+        text = f"前半场第{i}项接口要求：上线前完成校验。"
+        start = runtime.stream.cursor
+        runtime.ingest(TranscriptChunk(
+            chunk_id=str(i), seq=i + 1, text=text, start=start, end=start + len(text)
+        ))
+        runtime.knowledge.facts.append(Fact(
+            id=f"f{i:06d}", text=text, kind="constraint", status="confirmed",
+            topic="接口要求", subject=f"接口{i}", source_ids=[runtime.stream.sources[-1].id],
+        ))
+    text = "后半场要求加强团队纪律，合理安排工作压力。"
+    start = runtime.stream.cursor
+    runtime.ingest(TranscriptChunk(
+        chunk_id="tail", seq=26, text=text, start=start, end=start + len(text)
+    ))
+    runtime.knowledge.facts.append(Fact(
+        id="f000025", text=text, kind="fact", status="confirmed",
+        topic="团队管理", subject="团队纪律", source_ids=[runtime.stream.sources[-1].id],
+    ))
+    await runtime.compose()
+    for task in ("minutes", "minutes_review"):
+        payload = next(p for name, p in model.calls if name == task)
+        assert any("团队纪律" in s["text"] for s in payload["sources"])
+        assert {f["id"] for f in payload["facts"]} == {f.id for f in runtime.knowledge.facts}
+    assert runtime.knowledge.draft.coverage["body_facts"] == 26
+    assert not any(task == "chapter" for task, _ in model.calls)
+
+
 async def test_large_ledger_uses_multiple_bounded_selection_levels():
     from meetnote.domain.results import ChapterSelection, Fact
 

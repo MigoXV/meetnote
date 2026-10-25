@@ -9,9 +9,9 @@ from pydantic_core import from_json
 SECTIONS = ("overview", "conclusions", "discussion", "actions", "open_questions")
 
 
-def text_blocks(raw):
+def text_blocks(raw, complete_only=False):
     try:
-        data = from_json(raw, allow_partial="trailing-strings")
+        data = from_json(raw, allow_partial=True if complete_only else "trailing-strings")
     except ValueError:
         return {}
     if not isinstance(data, dict):
@@ -46,6 +46,8 @@ class RollingMinutes:
         self.sequence = 0
         self.preview = None
         self.target = 0
+        self.reviewed = -1
+        self.reviewing = False
 
     @property
     def dirty(self):
@@ -62,7 +64,7 @@ class RollingMinutes:
         self.engine.context.emit(kind, payload)
         return payload
 
-    def launch(self):
+    def launch(self, review=False):
         engine = self.engine
         snapshot = copy(engine)
         snapshot.state = deepcopy(engine.state)
@@ -73,6 +75,7 @@ class RollingMinutes:
         snapshot.state["stream"].pending = []
         snapshot.source_index = {s.id: s for s in snapshot.stream.sources}
         self.target = engine.stream.consumed
+        self.reviewing = review
         self.round += 1
         self.started = engine.clock()
         base = narrative_blocks(engine.knowledge.draft)
@@ -87,7 +90,8 @@ class RollingMinutes:
                 self.preview = self.emit("minutes.started", blocks=base, baseline=base)
                 return
             raw += delta
-            partial = text_blocks(raw)
+            # 已有草稿在替代段落的 text 字段完整前继续显示，避免逐字回退再增长。
+            partial = text_blocks(raw, complete_only=bool(base))
             blocks = {
                 **base,
                 **{
@@ -100,7 +104,9 @@ class RollingMinutes:
                 self.preview = self.emit("minutes.delta", blocks=blocks, baseline=base)
 
         self.preview = self.emit("minutes.started", blocks=base, baseline=base)
-        self.task = asyncio.create_task(snapshot.compose(on_output=output, commit=False))
+        self.task = asyncio.create_task(
+            snapshot.compose(on_output=output, commit=False, review=review)
+        )
 
     async def tick(self, force=False):
         if self.task and self.task.done():
@@ -115,6 +121,8 @@ class RollingMinutes:
             else:
                 self.engine.knowledge.draft = draft
                 self.covered = self.target
+                if self.reviewing:
+                    self.reviewed = self.target
                 self.preview = None
                 self.emit("minutes.updated", minutes=draft.model_dump(mode="json"))
         if (
@@ -127,15 +135,22 @@ class RollingMinutes:
             )
             and (self.engine.knowledge.facts or force)
         ):
-            self.launch()
+            self.launch(review=force)
 
     async def finish(self):
         while self.dirty:
             await self.tick(force=True)
             if self.task:
                 await asyncio.wait({self.task})
+        # 会中每轮只生成草稿；最终覆盖全部输入后审校一次，审校过程不覆盖正文预览。
+        draft = self.engine.knowledge.draft
+        if self.reviewed != self.covered:
+            draft = await self.engine.review_minutes(draft)
+            self.engine.knowledge.draft = draft
+            self.reviewed = self.covered
+            self.emit("minutes.updated", minutes=draft.model_dump(mode="json"))
         self.engine.context.emit(
-            "minutes.completed", self.engine.knowledge.draft.model_dump(mode="json")
+            "minutes.completed", draft.model_dump(mode="json")
         )
 
     async def close(self):

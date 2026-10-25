@@ -217,6 +217,45 @@ def fact_text(fact):
     return text
 
 
+def validate_minutes(result, allowed):
+    paragraphs = [
+        result.overview, *result.conclusions, *result.discussion,
+        *result.actions, *result.open_questions,
+    ]
+    for index, paragraph in enumerate(paragraphs):
+        for previous in paragraphs[:index]:
+            if (
+                min(len(paragraph.text), len(previous.text)) > 40
+                and SequenceMatcher(None, paragraph.text, previous.text).ratio() > 0.72
+            ):
+                raise ModelFailure(
+                    "minutes_repeats_same_content:概述、结论和讨论不能重复同一组信息，删除重复段落，空类别返回空数组"
+                )
+    if any(not set(p.fact_ids) <= allowed for p in paragraphs):
+        raise ModelFailure("minutes_reference_invalid")
+    if any(
+        re.search(r"f\d{6}|s\d+\.\d+|【(?:已确认|待确认)】|完整事项清单|原文索引", p.text)
+        for p in paragraphs
+    ):
+        raise ModelFailure("minutes_contains_internal_labels")
+
+
+def render_minutes(title, narrative):
+    chunks = ["# " + escape(title or "会议纪要")]
+    if narrative is None:
+        chunks.append("本次记录未包含可整理的实质讨论内容。")
+    else:
+        chunks.append(escape(narrative.overview.text))
+        for key, heading in [
+            ("conclusions", "主要结论"), ("discussion", "讨论要点"),
+            ("actions", "后续安排"), ("open_questions", "尚需明确"),
+        ]:
+            paragraphs = getattr(narrative, key)
+            if paragraphs:
+                chunks.extend(["## " + heading, "\n\n".join(escape(p.text) for p in paragraphs)])
+    return "\n\n".join(chunks)
+
+
 class MeetingEngine:
     def __init__(self, context, title="", meeting_date="", clock=monotonic):
         self.context, self.clock = context, clock
@@ -1311,7 +1350,35 @@ class MeetingEngine:
             current = [item(fid) for fid in selected]
         return current
 
-    async def compose(self, on_output=None, commit=True):
+    def minutes_payload(self, facts):
+        evidence = [
+            {"id": f.id, "source_ids": list(dict.fromkeys(f.source_ids[:1] + f.source_ids[-2:]))}
+            for f in facts
+        ]
+        refs = {sid for f in evidence for sid in f["source_ids"]}
+        return {
+            "facts": evidence,
+            "sources": [s.payload() for s in self.stream.sources if s.id in refs],
+        }
+
+    async def review_minutes(self, draft):
+        if draft.narrative is None:
+            return draft
+        ids = {fid for section in draft.sections for item in section.items for fid in item.fact_ids}
+        selected = [f for f in draft.checklist if f.id in ids]
+        schema = reader_minutes_schema([f.id for f in selected])
+        result = await self.context.invoke(
+            "minutes_review",
+            {**self.minutes_payload(selected), "draft": draft.narrative.model_dump(mode="json")},
+            schema,
+            lambda result: validate_minutes(result, ids),
+        )
+        narrative = ReaderMinutes.model_validate(result.model_dump())
+        return draft.model_copy(update={
+            "narrative": narrative, "markdown": render_minutes(draft.title, narrative),
+        })
+
+    async def compose(self, on_output=None, commit=True, review=True):
         active = self.knowledge.summaries
         body_candidates = [
             f
@@ -1323,6 +1390,17 @@ class MeetingEngine:
         ]
         by_id = {f.id: f for f in active}
         limit = self.context.settings.body_max_items
+        # 短中会议的完整证据能装入预算时，不先按固定条数淘汰后半场。
+        # 为最终审校的草稿保留一个完整输出预算，长会议仍使用有界选择。
+        if body_candidates:
+            payload = self.minutes_payload(body_candidates)
+            schema = reader_minutes_schema([f.id for f in body_candidates])
+            count = max(
+                self.context.budget.input_count(self.context.prompt(task), payload, schema)
+                for task in ("minutes", "minutes_review")
+            )
+            if count + self.context.settings.max_output_tokens <= self.context.settings.input_token_budget:
+                limit = max(limit, len(body_candidates))
         # 修订后的现行安排先保留独立名额，避免最后确认被大量早期背景挤掉。
         successors = {
             fid for f in self.knowledge.facts if f.status in INACTIVE for fid in f.related_ids
@@ -1375,82 +1453,22 @@ class MeetingEngine:
                 )
         sections = [Chapter(title=topic, items=items) for topic, items in groups.items()]
         narrative = None
-        chunks = ["# " + escape(self.title or "会议纪要")]
         selected = [
             by_id[fid] for fid in dict.fromkeys(fid for item in current for fid in item.fact_ids)
         ]
         if selected:
-            evidence = [
-                {
-                    "id": f.id,
-                    "source_ids": list(dict.fromkeys(f.source_ids[:1] + f.source_ids[-2:])),
-                }
-                for f in selected
-            ]
-            refs = {sid for f in evidence for sid in f["source_ids"]}
-            payload = {
-                "facts": evidence,
-                "sources": [s.payload() for s in self.stream.sources if s.id in refs],
-            }
+            payload = self.minutes_payload(selected)
             allowed = {f.id for f in selected}
             minutes_schema = reader_minutes_schema([f.id for f in selected])
-
-            def validate_minutes(result):
-                paragraphs = [
-                    result.overview,
-                    *result.conclusions,
-                    *result.discussion,
-                    *result.actions,
-                    *result.open_questions,
-                ]
-                for index, paragraph in enumerate(paragraphs):
-                    for previous in paragraphs[:index]:
-                        if (
-                            min(len(paragraph.text), len(previous.text)) > 40
-                            and SequenceMatcher(None, paragraph.text, previous.text).ratio() > 0.72
-                        ):
-                            raise ModelFailure(
-                                "minutes_repeats_same_content:概述、结论和讨论不能重复同一组信息，删除重复段落，空类别返回空数组"
-                            )
-                if any(not set(p.fact_ids) <= allowed for p in paragraphs):
-                    raise ModelFailure("minutes_reference_invalid")
-                if any(
-                    re.search(
-                        r"f\d{6}|s\d+\.\d+|【(?:已确认|待确认)】|完整事项清单|原文索引", p.text
-                    )
-                    for p in paragraphs
-                ):
-                    raise ModelFailure("minutes_contains_internal_labels")
-
             narrative = await self.context.invoke(
-                "minutes", payload, minutes_schema, validate_minutes,
+                "minutes", payload, minutes_schema,
+                lambda result: validate_minutes(result, allowed),
                 on_output=(lambda delta: on_output("minutes", delta)) if on_output else None,
             )
-            narrative = await self.context.invoke(
-                "minutes_review",
-                {**payload, "draft": narrative.model_dump(mode="json")},
-                minutes_schema,
-                validate_minutes,
-                on_output=(lambda delta: on_output("minutes_review", delta)) if on_output else None,
-            )
             narrative = ReaderMinutes.model_validate(narrative.model_dump())
-            chunks.append(escape(narrative.overview.text))
-            for key, heading in [
-                ("conclusions", "主要结论"),
-                ("discussion", "讨论要点"),
-                ("actions", "后续安排"),
-                ("open_questions", "尚需明确"),
-            ]:
-                paragraphs = getattr(narrative, key)
-                if paragraphs:
-                    chunks.extend(
-                        ["## " + heading, "\n\n".join(escape(p.text) for p in paragraphs)]
-                    )
-        else:
-            chunks.append("本次记录未包含可整理的实质讨论内容。")
         draft = MinuteDraft(
             title=self.title or "会议纪要",
-            markdown="\n\n".join(chunks),
+            markdown=render_minutes(self.title, narrative),
             narrative=narrative,
             sections=sections,
             checklist=active,
@@ -1461,9 +1479,12 @@ class MeetingEngine:
                 "processed_sources": len(self.stream.dispositions),
                 "active_facts": len(active),
                 "checklist_facts": len(active),
+                "body_facts": len(selected),
                 "consumed_chars": self.stream.consumed,
             },
         )
+        if review:
+            draft = await self.review_minutes(draft)
         if commit:
             self.knowledge.draft = draft
         return draft

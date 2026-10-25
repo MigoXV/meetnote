@@ -118,3 +118,86 @@ async def test_final_tail_updates_coverage_before_completed():
         assert model.minutes_calls == 2
     finally:
         await service.close()
+
+
+async def test_rolling_drafts_are_reviewed_once_after_all_input_is_consumed():
+    class CountReviews(StreamingModel):
+        def __init__(self):
+            super().__init__()
+            self.reviews = []
+
+        async def generate(self, task, instructions, context, schema):
+            if task == "minutes_review":
+                self.reviews.append(context)
+            return await super().generate(task, instructions, context, schema)
+
+    model = CountReviews()
+    model.hold.set()
+    service = SessionManager(
+        Settings(_env_file=None, provider="mock", checkpoint_seconds=0, minutes_interval=0), model
+    )
+    session = service.create()
+    try:
+        await service.append(session.id, ChunkInput(text="接口验收计划在周四完成。"))
+        await wait_until(lambda: session.engine.knowledge.draft is not None)
+        assert not model.reviews
+        await service.append(session.id, ChunkInput(text="后半场要求加强团队纪律，合理安排工作压力。"))
+        await wait_until(
+            lambda: session.engine.knowledge.draft.coverage["consumed_chars"] == session.chars
+        )
+        assert not model.reviews
+        calls = model.minutes_calls
+        await service.finalize(session.id)
+        await session.task
+        assert session.status == "completed"
+        assert model.minutes_calls == calls
+        assert len(model.reviews) == 1
+        assert any("团队纪律" in s["text"] for s in model.reviews[0]["sources"])
+        assert session.snapshot()["remaining_chars"] == 0
+    finally:
+        await service.close()
+
+
+async def test_partial_replacement_keeps_previous_paragraph_until_new_text_is_complete():
+    class ReplacementModel(MockClient):
+        def __init__(self):
+            self.partial = asyncio.Event()
+            self.resume = asyncio.Event()
+            self.calls = 0
+
+        async def generate(self, task, instructions, context, schema):
+            result = await super().generate(task, instructions, context, schema)
+            if task == "minutes":
+                self.calls += 1
+                if self.calls == 2:
+                    result = result.model_copy(update={
+                        "overview": result.overview.model_copy(update={"text": "更新后的完整会议概述。"}),
+                    })
+                    observer = output_observer.get()
+                    observer(None)
+                    observer('{"overview":{"text":"更新后')
+                    self.partial.set()
+                    await self.resume.wait()
+                    observer('的完整会议概述。"}}')
+            return result
+
+    model = ReplacementModel()
+    service = SessionManager(
+        Settings(_env_file=None, provider="mock", checkpoint_seconds=0, minutes_interval=0), model
+    )
+    session = service.create()
+    try:
+        await service.append(session.id, ChunkInput(text="前半场讨论接口验收。"))
+        await wait_until(lambda: session.engine.knowledge.draft is not None)
+        previous = session.engine.knowledge.draft.narrative.overview.text
+        await service.append(session.id, ChunkInput(text="后半场补充人员分工。"))
+        await asyncio.wait_for(model.partial.wait(), 2)
+        assert session.snapshot()["minutes_preview"]["blocks"]["overview.0"] == previous
+        model.resume.set()
+        await service.finalize(session.id)
+        await session.task
+        assert session.status == "completed"
+        assert session.engine.knowledge.draft.narrative.overview.text == "更新后的完整会议概述。"
+    finally:
+        model.resume.set()
+        await service.close()
