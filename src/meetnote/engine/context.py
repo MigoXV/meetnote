@@ -92,6 +92,9 @@ class Context:
                 "queue_ms": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
+                "cached_tokens": 0,
+                "cache_reported_requests": 0,
+                "cache_reported_input_tokens": 0,
                 "errors": 0,
                 "first_output_ms": [],
             },
@@ -102,6 +105,15 @@ class Context:
         task["errors"] += bool(data.get("error"))
         for key in ("input_tokens", "output_tokens"):
             task[key] += (usage or {}).get(key) or 0
+        details = (usage or {}).get("input_tokens_details") or {}
+        if details.get("cached_tokens") is not None:
+            task["cached_tokens"] += details["cached_tokens"]
+            task["cache_reported_requests"] += 1
+            task["cache_reported_input_tokens"] += (usage or {}).get("input_tokens") or 0
+        task["cache_hit_ratio"] = (
+            task["cached_tokens"] / task["cache_reported_input_tokens"]
+            if task["cache_reported_input_tokens"] else None
+        )
         if data.get("first_output_ms") is not None:
             # 有界采样；累计计数不截断。
             task["first_output_ms"] = (task["first_output_ms"] + [data["first_output_ms"]])[-256:]
