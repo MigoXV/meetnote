@@ -234,6 +234,9 @@ async def test_usage_and_incomplete_reason_are_observable():
     assert ctx.stats["requests"] == 1
     assert ctx.stats["input_tokens"] == 12
     assert ctx.stats["cached_tokens"] == 8
+    assert ctx.stats["by_task"]["chapter"]["cached_tokens"] == 8
+    assert ctx.stats["by_task"]["chapter"]["cache_reported_requests"] == 1
+    assert ctx.stats["by_task"]["chapter"]["cache_hit_ratio"] == pytest.approx(8 / 12)
     assert ctx.stats["usage_unknown"] == 0
     assert next(d for k, d in events if k == "model.request")["response_id"] == "resp_1"
     await client.close()
@@ -265,5 +268,7 @@ async def test_request_metrics_record_first_output_and_task_totals():
     assert metrics["requests"] == 1
     assert metrics["errors"] == 0
     assert len(metrics["first_output_ms"]) == 1
+    assert metrics["cache_reported_requests"] == 0
+    assert metrics["cache_hit_ratio"] is None
     assert 0 <= metrics["first_output_ms"][0] <= metrics["elapsed_ms"]
     await client.close()
