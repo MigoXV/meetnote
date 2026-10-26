@@ -9,6 +9,16 @@ from meetnote.llm.client import ModelFailure
 logger = logging.getLogger(__name__)
 SCHEMAS = {"polish": PolishedText, "abstract": AbstractText, "actions": ActionsText}
 FAILURE_MESSAGE = "未能生成有效内容，请检查模型服务或稍后重试。"
+INCOMPLETE_PRODUCT = "product_incomplete_at_character_limit"
+
+
+def validate_product_text(result):
+    text = result.text.rstrip()
+    if not text:
+        raise ModelFailure("capability_output_empty")
+    limit = type(result).model_json_schema()["properties"]["text"].get("maxLength")
+    if limit and limit >= 32 and len(text) >= limit - 2 and text[-1] not in "。！？.!?）)】]”\"』」":
+        raise ModelFailure(INCOMPLETE_PRODUCT)
 
 
 def chunks(text):
@@ -52,9 +62,9 @@ async def text_product(engine, name, text):
     task, schema = "fulltext_" + name, SCHEMAS[name]
 
     async def generate(value, phase):
-        result = await context.invoke(task, {"text": value, "phase": phase}, schema)
-        if not result.text.strip():
-            raise ModelFailure("capability_output_empty")
+        result = await context.invoke(
+            task, {"text": value, "phase": phase}, schema, validate_product_text
+        )
         return result.text
 
     async def finish(value):
@@ -98,7 +108,8 @@ async def generate_fulltext(engine, request_id, text, pipeline):
                     for chunk in chunks(text):
                         yield chunk
 
-                await engine.run(inputs())
+                # 全文接口只交付最终产物；仍由主引擎消费、核验及最终刷新。
+                await engine.run(inputs(), rolling_minutes=False)
                 draft = engine.knowledge.draft
                 if not draft or engine.stream.consumed != len(text):
                     raise ModelFailure("capability_output_empty")

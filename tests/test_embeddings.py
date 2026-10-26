@@ -245,7 +245,9 @@ async def test_recall_filters_candidates_before_top_k_and_uses_fact_not_whole_tu
     assert all(text not in value for call in encoder.calls for value in call)
 
 
-async def test_paged_evidence_review_has_shared_output_budget_before_generation():
+@pytest.mark.parametrize("repair", [False, True])
+async def test_paged_evidence_review_has_shared_output_budget_before_generation(repair):
+    from meetnote.domain.fulltext import ActionsText
     from meetnote.embeddings.evidence import review_product
 
     ctx = context()
@@ -254,16 +256,20 @@ async def test_paged_evidence_review_has_shared_output_budget_before_generation(
     async def expand(task, instructions, payload, schema):
         cap = schema.model_json_schema()["properties"]["text"]["maxLength"]
         calls.append((payload, cap))
-        return schema.model_validate({"text": "审" * cap})
+        text = "审" * cap if repair and not payload.get("validation_error") else "审" * (cap - 1) + "。"
+        return schema.model_validate({"text": text})
 
     ctx.model.generate = expand
     source = "各项工作需要核实，未批准的安排不能执行。" * 80
     product = "\n".join(f"任务{i:02}需要核实，不能视为已批准。" for i in range(70))
     result = await review_product(ctx, "actions", source, product)
-    assert 1 < len(calls) < 70
-    assert len(result) == 1800
-    assert sum(cap for _, cap in calls) + len(calls) - 1 == 1800
+    pages = [(payload, cap) for payload, cap in calls if not payload.get("validation_error")]
+    assert 1 < len(pages) < 70
+    limit = ActionsText.model_json_schema()["properties"]["text"]["maxLength"]
+    assert len(result) == limit
+    assert sum(cap for _, cap in pages) + len(pages) - 1 == limit
     assert all(len(payload["evidence"]) > 1 for payload, _ in calls)
+    assert ctx.stats.get("validation_retries", 0) == (len(pages) if repair else 0)
 
 
 @pytest.mark.parametrize("same_batch", [False, True])

@@ -140,9 +140,7 @@ class ResponsesClient:
             stream=True,
             store=False,
             temperature=self.settings.temperature,
-            max_output_tokens=min(
-                self.settings.max_output_tokens, 4096 if task == "extract" else 2048
-            ),
+            max_output_tokens=self.settings.max_output_tokens,
             text={
                 "format": {
                     "type": "json_schema",

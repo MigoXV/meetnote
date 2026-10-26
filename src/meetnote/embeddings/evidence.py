@@ -24,8 +24,23 @@ def source_windows(text, target=240):
     return windows
 
 
+def review_page_schema(cap):
+    return create_model(
+        "EvidenceReviewPage",
+        __base__=Result,
+        text=(
+            str,
+            Field(
+                min_length=1,
+                max_length=cap,
+                description=f"本页草稿审校后的完整替代；上限 {cap} 字符，尽量控制在 {max(1, cap * 3 // 4)} 字符内；只处理本页事项，保留条件和状态，压缩重复，用完整句子结束，不截断末句，不扩写整场计划",
+            ),
+        ),
+    )
+
+
 async def review_product(context, name, source, product):
-    from meetnote.engine.fulltext import SCHEMAS
+    from meetnote.engine.fulltext import INCOMPLETE_PRODUCT, SCHEMAS, validate_product_text
 
     base_schema = SCHEMAS[name]
     windows = source_windows(source)
@@ -48,21 +63,27 @@ async def review_product(context, name, source, product):
             "sources": list(sources.values()),
         }
 
+    def fits(payload, schema):
+        # 为实际纠正包预留输入空间；不能初次请求刚好塞满，随后无法纠正断尾。
+        return context.fits(
+            "fulltext_evidence", context.validation_input(payload, INCOMPLETE_PRODUCT), schema
+        )
+
     payload = payload_for(evidence, product)
-    if context.fits("fulltext_evidence", payload, base_schema):
-        result = await context.invoke("fulltext_evidence", payload, base_schema)
-        if not result.text.strip():
-            raise ModelFailure("embedding_evidence_review_empty")
+    if fits(payload, base_schema):
+        result = await context.invoke(
+            "fulltext_evidence", payload, base_schema, validate_product_text
+        )
         return result.text
 
     # 按请求预算打包多条待审内容；同一窗口只发送一次，不能退化为每句一份完整计划。
     pages, current = [], []
+    limit = base_schema.model_json_schema()["properties"]["text"]["maxLength"]
+    packing_schema = review_page_schema(limit)
     for item in evidence:
         candidate = current + [item]
         draft = "\n".join(row["claim"] for row in candidate)
-        if current and not context.fits(
-            "fulltext_evidence", payload_for(candidate, draft), base_schema
-        ):
+        if current and not fits(payload_for(candidate, draft), packing_schema):
             pages.append(current)
             current = [item]
         else:
@@ -71,7 +92,7 @@ async def review_product(context, name, source, product):
         pages.append(current)
     drafts = ["\n".join(row["claim"] for row in page) for page in pages]
     # 输出字符预算在分页前分配，含页间换行；不截断已生成正文来规避产物契约。
-    remaining = base_schema.model_json_schema()["properties"]["text"]["maxLength"] - len(pages) + 1
+    remaining = limit - len(pages) + 1
     weight = sum(len(draft) for draft in drafts)
     if remaining < len(pages) or not weight:
         raise ModelFailure("evidence_review_output_budget_exceeded")
@@ -84,20 +105,9 @@ async def review_product(context, name, source, product):
         )
         remaining -= cap
         weight -= len(draft)
-        schema = create_model(
-            "EvidenceReviewPage",
-            __base__=Result,
-            text=(
-                str,
-                Field(
-                    min_length=1,
-                    max_length=cap,
-                    description="本页草稿审校后的完整替代；只处理本页事项，保留条件和状态，不扩写整场计划",
-                ),
-            ),
+        schema = review_page_schema(cap)
+        result = await context.invoke(
+            "fulltext_evidence", payload_for(page, draft), schema, validate_product_text
         )
-        result = await context.invoke("fulltext_evidence", payload_for(page, draft), schema)
-        if not result.text.strip():
-            raise ModelFailure("embedding_evidence_review_empty")
         revised.append(result.text)
     return base_schema.model_validate({"text": "\n".join(revised)}).text

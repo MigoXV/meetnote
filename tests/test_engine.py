@@ -621,6 +621,65 @@ async def test_incomplete_single_revision_retries_once_and_never_silently_commit
     assert calls == 2
 
 
+class WrongRelationEvidence(Scripted):
+    def __init__(self, *, recover):
+        super().__init__(extract=lambda c: {"facts": [fact(s) for s in c["sources"]]})
+        self.recover = recover
+
+    async def generate(self, task, instructions, context, schema):
+        if task != "reconcile":
+            return await super().generate(task, instructions, context, schema)
+        self.calls.append((task, context))
+        values = {}
+        for key, pair in context["pairs"].items():
+            # 两种关系均被 Schema 允许，但“改为”句不能作为 retracts 的证据。
+            kind = "supersedes" if self.recover and len(context["pairs"]) == 1 else "retracts"
+            values[key] = {
+                "kind": kind,
+                "evidence_id": pair["evidence_ids"][0],
+                "reason": "核对原文中的取消安排",
+            }
+        return schema.model_validate(values)
+
+
+async def test_invalid_relation_batch_rechecks_every_pair_before_commit():
+    model = WrongRelationEvidence(recover=True)
+    runtime, _ = engine(model)
+    for i in range(8):
+        await append(runtime, f"采购预算原定第{i}版。")
+        await runtime.cycle("flush")
+    await append(runtime, "采购预算确认改为第八版。采购预算原方案取消。")
+    await append(runtime, "采购预算确认改为第九版。采购预算原方案取消。")
+    await runtime.finalize()
+    pages = [payload for task, payload in model.calls if task == "reconcile"]
+    batched = {tuple(pair) for p in pages if len(p["pairs"]) > 1 for pair in p["allowed_pairs"]}
+    singles = [tuple(p["allowed_pairs"][0]) for p in pages if len(p["pairs"]) == 1]
+    assert batched
+    assert set(singles) == batched
+    assert len(singles) == len(set(singles))
+    assert runtime.knowledge.revisions
+    assert all(revision.after.status == "superseded" for revision in runtime.knowledge.revisions)
+    assert runtime.stream.consumed == runtime.stream.cursor
+    assert runtime.finalized
+
+
+async def test_invalid_single_relation_preserves_pending_input_and_original_facts():
+    model = WrongRelationEvidence(recover=False)
+    runtime, _ = engine(model)
+    await append(runtime, "采购预算原定十万元。")
+    await runtime.cycle("flush")
+    before = runtime.stream.consumed
+    await append(runtime, "采购预算确认改为二十万元。采购预算原方案取消。")
+    with pytest.raises(ModelFailure, match="relation_evidence_invalid"):
+        await runtime.finalize()
+    assert len([task for task, _ in model.calls if task == "reconcile"]) == 2
+    assert runtime.stream.consumed == before
+    assert len(runtime.knowledge.facts) == 1
+    assert runtime.knowledge.facts[0].status == "confirmed"
+    assert not runtime.knowledge.revisions
+    assert not runtime.finalized
+
+
 async def test_chapter_pages_do_not_drop_checklist_facts():
     runtime, _ = engine(batch_tokens=512, source_tokens=128)
     for i in range(30):
@@ -632,6 +691,41 @@ async def test_chapter_pages_do_not_drop_checklist_facts():
     assert set(draft.evidence_trace) == {f.id for f in runtime.knowledge.summaries}
     assert len(draft.checklist) == 30
     assert "完整事项清单" not in draft.markdown
+
+
+async def test_complete_evidence_within_budget_keeps_late_topic_in_minutes_input():
+    from meetnote.domain.results import Fact
+
+    model = Scripted()
+    runtime, _ = engine(
+        model, body_max_items=6, input_token_budget=32768, max_output_tokens=1024
+    )
+    for i in range(25):
+        text = f"前半场第{i}项接口要求：上线前完成校验。"
+        start = runtime.stream.cursor
+        runtime.ingest(TranscriptChunk(
+            chunk_id=str(i), seq=i + 1, text=text, start=start, end=start + len(text)
+        ))
+        runtime.knowledge.facts.append(Fact(
+            id=f"f{i:06d}", text=text, kind="constraint", status="confirmed",
+            topic="接口要求", subject=f"接口{i}", source_ids=[runtime.stream.sources[-1].id],
+        ))
+    text = "后半场要求加强团队纪律，合理安排工作压力。"
+    start = runtime.stream.cursor
+    runtime.ingest(TranscriptChunk(
+        chunk_id="tail", seq=26, text=text, start=start, end=start + len(text)
+    ))
+    runtime.knowledge.facts.append(Fact(
+        id="f000025", text=text, kind="fact", status="confirmed",
+        topic="团队管理", subject="团队纪律", source_ids=[runtime.stream.sources[-1].id],
+    ))
+    await runtime.compose()
+    for task in ("minutes", "minutes_review"):
+        payload = next(p for name, p in model.calls if name == task)
+        assert any("团队纪律" in s["text"] for s in payload["sources"])
+        assert {f["id"] for f in payload["facts"]} == {f.id for f in runtime.knowledge.facts}
+    assert runtime.knowledge.draft.coverage["body_facts"] == 26
+    assert not any(task == "chapter" for task, _ in model.calls)
 
 
 async def test_large_ledger_uses_multiple_bounded_selection_levels():

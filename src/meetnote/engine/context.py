@@ -57,6 +57,14 @@ class Context:
             <= self.settings.input_token_budget
         )
 
+    @staticmethod
+    def validation_input(context, error):
+        return {
+            **context,
+            "validation_error": str(error),
+            "instruction": "重新输出完整结果，修正引用和覆盖错误。",
+        }
+
     def observe(self, data):
         backend = data.get("backend", "responses")
         self.stats[backend + "_requests"] = self.stats.get(backend + "_requests", 0) + 1
@@ -84,6 +92,9 @@ class Context:
                 "queue_ms": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
+                "cached_tokens": 0,
+                "cache_reported_requests": 0,
+                "cache_reported_input_tokens": 0,
                 "errors": 0,
                 "first_output_ms": [],
             },
@@ -94,6 +105,15 @@ class Context:
         task["errors"] += bool(data.get("error"))
         for key in ("input_tokens", "output_tokens"):
             task[key] += (usage or {}).get(key) or 0
+        details = (usage or {}).get("input_tokens_details") or {}
+        if details.get("cached_tokens") is not None:
+            task["cached_tokens"] += details["cached_tokens"]
+            task["cache_reported_requests"] += 1
+            task["cache_reported_input_tokens"] += (usage or {}).get("input_tokens") or 0
+        task["cache_hit_ratio"] = (
+            task["cached_tokens"] / task["cache_reported_input_tokens"]
+            if task["cache_reported_input_tokens"] else None
+        )
         if data.get("first_output_ms") is not None:
             # 有界采样；累计计数不截断。
             task["first_output_ms"] = (task["first_output_ms"] + [data["first_output_ms"]])[-256:]
@@ -160,11 +180,7 @@ class Context:
                     )
                     if not retry_validation:
                         raise ModelFailure("task_validation_failed:" + str(exc)) from exc
-                    correction = {
-                        **context,
-                        "validation_error": str(exc),
-                        "instruction": "重新输出完整结果，修正引用和覆盖错误。",
-                    }
+                    correction = self.validation_input(context, exc)
                     with_output = {**correction, "invalid_output": result.model_dump(mode="json")}
                     if self.fits(task, with_output, schema):
                         correction = with_output
